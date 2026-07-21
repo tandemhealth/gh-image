@@ -1,6 +1,6 @@
 # Tandem security validation — 2026-07-22
 
-The Tandem release candidate is **validated for one agent-generated PNG upload per invocation**. Validation used Go 1.26.5, 196 passing Go test cases, race detection, `go vet`, golangci-lint 2.12.2, govulncheck 1.6.0, two identical candidate builds of six platform binaries, and one live upload to `tandemhealth/gh-image`. The old input path accepted any number of arbitrary readable files; the validated path accepts exactly one absolute PNG beneath a configured evidence directory. No Tandem release existed when this report was written; publication is a separate final step after independent patch approval.
+Tandem release [`v1.2.0-tandem.1`](https://github.com/tandemhealth/gh-image/releases/tag/v1.2.0-tandem.1) is **validated for one agent-generated PNG upload per invocation**. Validation used Go 1.26.5, 196 passing Go test cases, race detection, `go vet`, golangci-lint 2.12.2, govulncheck 1.6.0, two identical clean builds of six platform binaries, and one live upload through the installed pinned release. The old input path accepted any number of arbitrary readable files; the released path accepts exactly one absolute PNG beneath a configured evidence directory. The release tag points to independently approved commit `0a3e057cd685abbc8ad7afb428e338c13cf2fc70`.
 
 The input changes are directly tied to the audit findings:
 
@@ -22,15 +22,16 @@ Verification results:
 - `go vet ./...`: 0 diagnostics.
 - golangci-lint 2.12.2: 0 issues.
 - govulncheck 1.6.0 with Go 1.26.5: 0 reachable vulnerabilities.
-- Candidate cross-build matrix: macOS amd64/arm64, Linux amd64/arm64, Windows amd64, and Android arm64. Two candidate builds produced identical SHA-256 values for all 6 binaries.
-- Live synthetic upload after complete decode and canonical re-encoding: `validation.png` produced [a repository-scoped GitHub user attachment](https://github.com/user-attachments/assets/c9eb0d6c-71d2-416c-b535-e98f35302854).
+- Release cross-build matrix: macOS amd64/arm64, Linux amd64/arm64, Windows amd64, and Android arm64. Two clean builds produced identical SHA-256 values for all 6 binaries; released binary metadata reports Go 1.26.5, revision `0a3e057cd685abbc8ad7afb428e338c13cf2fc70`, and `vcs.modified=false`. The release includes the six values in [`checksums.txt`](https://github.com/tandemhealth/gh-image/releases/download/v1.2.0-tandem.1/checksums.txt).
+- Installed release: `gh extension list` reports `tandemhealth/gh-image v1.2.0-tandem.1`, and `gh image --version` reports `gh-image v1.2.0-tandem.1`.
+- Live synthetic upload through that installed release: `validation.png` produced [a repository-scoped GitHub user attachment](https://github.com/user-attachments/assets/d637f40c-a117-4112-b72b-375a8c4badf2).
 
 The validation keeps four explicitly accepted behaviors unchanged:
 
 - `GH_SESSION_TOKEN` remains inherited by the local `git` and `gh` repository-resolution subprocesses.
 - Browser-cookie discovery and `extract-token` remain available; the program can use a developer's logged-in GitHub browser session.
 - The S3 upload uses GitHub's server-provided policy URL and the HTTP client's normal redirect behavior.
-- The release workflow still refers to tagged GitHub Actions and a moving Go toolchain. The planned `v1.2.0-tandem.1` assets will be built separately with exactly Go 1.26.5 after approval.
+- The release workflow still refers to tagged GitHub Actions and a moving Go toolchain. The `v1.2.0-tandem.1` assets were built separately with exactly Go 1.26.5 after approval.
 
 `GH_IMAGE_EVIDENCE_ROOT` is a safety rail against accidental file selection. It does not protect against an agent or process allowed to replace its own environment or command-line arguments. Hard links can give the same inode a second name outside the evidence directory. Neither limitation changes the uploaded bytes after validation because the client uploads the immutable in-memory snapshot.
 

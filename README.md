@@ -24,7 +24,7 @@ $ GH_IMAGE_EVIDENCE_ROOT=/absolute/evidence \
 
 ## Installation
 
-The first locked-down release is being prepared as `v1.2.0-tandem.1`. Until that release exists, build the reviewed source below instead of installing an upstream binary. After publication, the pinned install command will be:
+Install the reviewed Tandem release at the exact validated version:
 
 ```bash
 gh extension install tandemhealth/gh-image --pin v1.2.0-tandem.1
@@ -151,7 +151,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}              # for gh CLI auth
           GH_SESSION_TOKEN: ${{ secrets.GH_SESSION_TOKEN }}  # for the upload itself
         run: |
-          gh extension install tandemhealth/gh-image --pin v1.2.0-tandem.1 # after publication
+          gh extension install tandemhealth/gh-image --pin v1.2.0-tandem.1
           gh image check-token                                # optional: fail fast if the session expired
           GH_IMAGE_EVIDENCE_ROOT="$GITHUB_WORKSPACE/test-results" \
             gh image "$GITHUB_WORKSPACE/test-results/screenshot.png" --repo ${{ github.repository }}
