@@ -5,11 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"mime"
 	"mime/multipart"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -22,7 +19,7 @@ import (
 type Result struct {
 	URL      string // https://github.com/user-attachments/assets/<uuid> (images) or /files/<id>/<name>
 	Name     string // sanitized filename
-	Markdown string // ![name](url) for images, bare url for videos, [name](url) for other files
+	Markdown string // ![name](url)
 }
 
 // policyResponse represents the JSON response from /upload/policies/assets.
@@ -36,10 +33,7 @@ type policyResponse struct {
 		Href        string `json:"href"`
 	} `json:"asset"`
 	Form map[string]string `json:"form"`
-	// AssetUploadURL is the path to PUT to finalize the upload. GitHub routes
-	// images to /upload/assets/{id} and other files (PDF, zip, ...) to
-	// /upload/repository-files/{id}; using the server-provided path means we
-	// don't hardcode either and follow whatever GitHub chooses per file type.
+	// AssetUploadURL is the server-provided path used to finalize the PNG.
 	AssetUploadURL               string `json:"asset_upload_url"`
 	AssetUploadAuthenticityToken string `json:"asset_upload_authenticity_token"`
 }
@@ -67,13 +61,12 @@ func NewClient(sessionCookie *http.Cookie) *Client {
 
 // Upload uploads a file to GitHub and returns the asset URL.
 // owner/repo identifies the target repository, repoID is its numeric ID.
-func (c *Client) Upload(owner, repo string, repoID int, path string) (*Result, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, fmt.Errorf("file: %w", err)
+func (c *Client) Upload(owner, repo string, repoID int, evidence *Evidence) (*Result, error) {
+	if evidence == nil {
+		return nil, fmt.Errorf("evidence is required")
 	}
-	contentType := detectContentType(path)
-	fileName := filepath.Base(path)
+	contentType := "image/png"
+	fileName := evidence.Name()
 
 	// Step 0: Get uploadToken from repo page
 	uploadToken, err := c.getUploadToken(owner, repo)
@@ -82,13 +75,13 @@ func (c *Client) Upload(owner, repo string, repoID int, path string) (*Result, e
 	}
 
 	// Step 1: Request upload policy
-	policy, err := c.requestPolicy(owner, repo, uploadToken, repoID, fileName, info.Size(), contentType)
+	policy, err := c.requestPolicy(owner, repo, uploadToken, repoID, fileName, evidence.Size(), contentType)
 	if err != nil {
 		return nil, fmt.Errorf("step 1 (request policy): %w", err)
 	}
 
 	// Step 2: Upload file to S3
-	err = uploadToS3(policy, path, fileName, contentType)
+	err = uploadToS3(policy, evidence.Reader(), fileName, contentType)
 	if err != nil {
 		return nil, fmt.Errorf("step 2 (S3 upload): %w", err)
 	}
@@ -172,6 +165,9 @@ func (c *Client) requestPolicy(owner, repo, uploadToken string, repoID int, file
 	if policy.Asset.ContentType == "" {
 		return nil, fmt.Errorf("policy response missing asset content_type")
 	}
+	if policy.Asset.ContentType != "image/png" {
+		return nil, fmt.Errorf("policy response returned unexpected asset content_type %q", policy.Asset.ContentType)
+	}
 
 	return &policy, nil
 }
@@ -226,84 +222,8 @@ func (c *Client) finalizeUpload(owner, repo string, policy *policyResponse) (*Re
 	return &Result{
 		URL:      result.Href,
 		Name:     result.Name,
-		Markdown: renderMarkdown(result.Name, result.Href, policy.Asset.ContentType),
+		Markdown: fmt.Sprintf("![%s](%s)", result.Name, result.Href),
 	}, nil
-}
-
-// renderMarkdown returns the reference GitHub itself produces on drag-and-drop,
-// which differs by media type:
-//   - images: an inline embed, ![name](url)
-//   - videos: the bare asset URL. GitHub renders a user-attachments video asset
-//     as an inline <video> player when its URL sits on its own line; wrapping it
-//     in link or embed syntax would only show a link, so we emit the raw URL.
-//   - everything else (PDF, zip, docx, ...): a plain download link, [name](url)
-func renderMarkdown(name, href, contentType string) string {
-	switch {
-	case strings.HasPrefix(contentType, "image/"):
-		return fmt.Sprintf("![%s](%s)", name, href)
-	case strings.HasPrefix(contentType, "video/"):
-		return href
-	default:
-		return fmt.Sprintf("[%s](%s)", name, href)
-	}
-}
-
-// githubContentType overrides Go's mime table for extensions whose
-// GitHub-expected content type differs from what mime.TypeByExtension reports.
-// GitHub validates the content_type against the file extension and rejects the
-// policy request (422) on a mismatch.
-//
-// mime.TypeByExtension is unreliable here for two reasons: on Windows it reads
-// the registry, which can return legacy types (.jpg -> image/pjpeg); and for
-// many code/data extensions it returns nothing on every OS, so detectContentType
-// falls back to application/octet-stream, which GitHub rejects for text types.
-// Each value below was verified accepted (HTTP 201) against GitHub's policy
-// endpoint; the alternatives Go would otherwise send were verified rejected (422).
-var githubContentType = map[string]string{
-	// Windows registry emits legacy image/pjpeg or image/jpg for JPEG.
-	".jpg":  "image/jpeg",
-	".jpeg": "image/jpeg",
-	// Windows registry emits text/plain; GitHub also rejects application/javascript.
-	".js": "text/javascript",
-	// Go returns audio/x-wav / text/x-c, both rejected.
-	".wav": "audio/wav",
-	".cpp": "text/x-c++",
-	// Go returns video/mp2t for .ts (the MPEG-TS collision) on every OS.
-	".ts":  "text/typescript",
-	".tsx": "text/tsx",
-	// Go reports these but GitHub wants a different type.
-	".log": "text/x-log",
-	".sql": "application/sql",
-	".pdb": "application/octet-stream",
-	// Go has no mapping for these, so it falls back to application/octet-stream.
-	".md":         "text/markdown",
-	".jsonc":      "application/json",
-	".cs":         "text/x-csharp",
-	".php":        "text/x-php",
-	".py":         "text/x-python",
-	".patch":      "text/x-patch",
-	".cpuprofile": "application/json",
-	".ipynb":      "application/x-ipynb+json",
-	".yaml":       "application/x-yaml",
-	".yml":        "application/x-yaml",
-	".tgz":        "application/gzip",
-}
-
-func detectContentType(path string) string {
-	ext := strings.ToLower(filepath.Ext(path))
-	if ct, ok := githubContentType[ext]; ok {
-		return ct
-	}
-	ct := mime.TypeByExtension(ext)
-	if ct == "" {
-		return "application/octet-stream"
-	}
-	// GitHub's content_type allowlist matches bare media types, so drop any
-	// parameters Go appends (e.g. "text/plain; charset=utf-8" -> "text/plain").
-	if mediaType, _, err := mime.ParseMediaType(ct); err == nil {
-		return mediaType
-	}
-	return ct
 }
 
 func truncate(s string, maxLen int) string {

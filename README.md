@@ -3,43 +3,38 @@
 </p>
 
 <p align="center">
-  <em>Drop images and files into GitHub issues, PRs, and READMEs, straight from the command line.</em>
+  <em>Attach agent-generated PNG screenshots to GitHub issues and pull requests.</em>
 </p>
 
 <p align="center">
-  <a href="https://github.com/drogers0/gh-image/releases/latest"><img src="https://img.shields.io/github/v/release/drogers0/gh-image?color=blue" alt="Latest release"></a>
-  <a href="https://github.com/drogers0/gh-image/stargazers"><img src="https://img.shields.io/github/stars/drogers0/gh-image?style=flat&color=yellow" alt="GitHub stars"></a>
-  <a href="https://github.com/drogers0/gh-image/releases"><img src="https://img.shields.io/github/downloads/drogers0/gh-image/total?color=green" alt="Total downloads"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/drogers0/gh-image?color=lightgrey" alt="License: MIT"></a>
-  <a href="https://github.com/drogers0/gh-image/actions/workflows/lint.yml"><img src="https://github.com/drogers0/gh-image/actions/workflows/lint.yml/badge.svg" alt="Lint"></a>
-  <a href="https://skills.sh/drogers0/gh-image"><img src="https://skills.sh/b/drogers0/gh-image" alt="skills.sh"></a>
+  <a href="https://github.com/tandemhealth/gh-image/releases/latest"><img src="https://img.shields.io/github/v/release/tandemhealth/gh-image?color=blue" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/tandemhealth/gh-image?color=lightgrey" alt="License: MIT"></a>
+  <a href="https://github.com/tandemhealth/gh-image/actions/workflows/lint.yml"><img src="https://github.com/tandemhealth/gh-image/actions/workflows/lint.yml/badge.svg" alt="Lint"></a>
 </p>
 
 ---
 
-GitHub has no public API for the attachment uploads its web UI accepts via drag-and-drop. That internal endpoint produces `user-attachments` URLs whose visibility is scoped to the repository they were uploaded to. `gh-image` replicates that flow as a `gh` CLI extension, so you can drop a screenshot — or any GitHub-supported file like a PDF, zip, or log — into a bug report, README, or Slack thread without leaving the terminal, and uploads on private repos stay private. Images render as inline embeds, videos as inline players, and other files as download links.
+GitHub has no public API for the attachment uploads its web UI accepts via drag-and-drop. This Tandem fork uses that internal endpoint for one purpose: upload one agent-generated PNG screenshot from a configured evidence directory and return a repository-scoped `user-attachments` URL. It rejects batches, relative paths, non-PNG files, symlinks, non-regular files, and PNGs over 10,000,000 bytes before reading GitHub credentials or making network requests.
 
 ```console
-$ gh image screenshot.png
+$ GH_IMAGE_EVIDENCE_ROOT=/absolute/evidence \
+    gh image /absolute/evidence/screenshot.png
 ![screenshot.png](https://github.com/user-attachments/assets/88f4599a-…-bc24)
-
-$ gh image report.pdf
-[report.pdf](https://github.com/user-attachments/files/123456/report.pdf)
 ```
 
 ## Installation
 
-```bash
-gh extension install drogers0/gh-image
-```
+The first locked-down release is being prepared as `v1.2.0-tandem.1`. Until that release exists, build the reviewed source below instead of installing an upstream binary. After publication, the pinned install command will be:
 
-That's it. The [`gh` CLI](https://cli.github.com) auto-detects your platform and downloads the prebuilt binary. Pre-built releases ship for **macOS** (arm64, amd64), **Linux** (amd64, arm64), **Windows** (amd64), and **Android/Termux** (arm64).
+```bash
+gh extension install tandemhealth/gh-image --pin v1.2.0-tandem.1
+```
 
 <details>
 <summary>Build from source</summary>
 
 ```bash
-git clone https://github.com/drogers0/gh-image
+git clone https://github.com/tandemhealth/gh-image
 cd gh-image
 go build -o gh-image
 gh extension install .
@@ -53,27 +48,21 @@ Requires Go 1.26+.
 
 ```bash
 # Upload an image (infers repo from the current git workspace)
-gh image screenshot.png
-
-# Upload multiple files at once (images or anything GitHub accepts)
-gh image hero.png diagram.png chart.png
-
-# Upload any GitHub-supported file (PDF, zip, log, …) — renders as a download link
-gh image report.pdf
+GH_IMAGE_EVIDENCE_ROOT=/absolute/evidence \
+  gh image /absolute/evidence/screenshot.png
 
 # Target a specific repository
-gh image screenshot.png --repo owner/repo
+GH_IMAGE_EVIDENCE_ROOT=/absolute/evidence \
+  gh image /absolute/evidence/screenshot.png --repo owner/repo
 ```
 
-Each successful upload prints a ready-to-paste reference on its own line — an inline embed for images, a bare URL for videos (which GitHub renders as an inline player), and a download link for other files:
+Each successful upload prints one ready-to-paste image reference:
 
 ```
-![hero.png](https://github.com/user-attachments/assets/…)
-https://github.com/user-attachments/assets/…
-[report.pdf](https://github.com/user-attachments/files/…/report.pdf)
+![screenshot.png](https://github.com/user-attachments/assets/…)
 ```
 
-If any upload fails, the error is printed to stderr and the process exits non-zero — other files in the batch still upload.
+If validation or upload fails, the error is printed to stderr and the process exits non-zero.
 
 ### Pipe directly into an issue, PR, or comment
 
@@ -84,17 +73,17 @@ gh issue create \
   --title "Login button stuck in loading state" \
   --body "Repro on staging:
 
-$(gh image bug.png)
+$(GH_IMAGE_EVIDENCE_ROOT="$PWD/test-results" gh image "$PWD/test-results/bug.png")
 
 Happens consistently after the third click."
 ```
 
 ## Use with AI agents
 
-`gh-image` is packaged as an [agent skill](https://agentskills.io), so AI coding agents can upload and embed images or attach files for you — just ask in natural language, e.g. *"attach this screenshot to the PR"* or *"file an issue and attach this log."*
+`gh-image` is packaged as an [agent skill](https://agentskills.io), so AI coding agents can upload and embed synthetic screenshots without a per-upload browser interaction.
 
 ```bash
-npx skills add drogers0/gh-image
+npx skills add tandemhealth/gh-image
 ```
 
 The open [Agent Skills standard](https://agentskills.io/clients) is supported by **Claude Code**, **OpenAI Codex**, **Cursor**, **GitHub Copilot**, and [many more](https://agentskills.io/clients). The skill walks the agent through installing this extension (if needed), running the upload, and embedding the resulting `user-attachments` URL into a PR, issue, or comment.
@@ -162,9 +151,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}              # for gh CLI auth
           GH_SESSION_TOKEN: ${{ secrets.GH_SESSION_TOKEN }}  # for the upload itself
         run: |
-          gh extension install drogers0/gh-image
+          gh extension install tandemhealth/gh-image --pin v1.2.0-tandem.1 # after publication
           gh image check-token                                # optional: fail fast if the session expired
-          gh image screenshot.png --repo ${{ github.repository }}
+          GH_IMAGE_EVIDENCE_ROOT="$GITHUB_WORKSPACE/test-results" \
+            gh image "$GITHUB_WORKSPACE/test-results/screenshot.png" --repo ${{ github.repository }}
 ```
 
 > [!NOTE]
@@ -172,21 +162,23 @@ jobs:
 
 ## How it works
 
-1. Resolves a `user_session` cookie from the configured source (flag → env → browser).
-2. Fetches the target repository's page to obtain an `uploadToken` from the embedded JS payload.
-3. Requests an S3 upload policy from `/upload/policies/assets`.
-4. Uploads the file directly to S3 using the presigned form fields.
-5. Calls back to GitHub to finalize the asset, using the finalize endpoint GitHub returns in the policy (`/upload/assets/{id}` for images, `/upload/repository-files/{id}` for other files).
-6. Prints the reference to stdout: `![name](url)` for images, the bare URL for videos (GitHub renders it as an inline player), or `[name](url)` for other files.
+1. Validates and snapshots one absolute PNG beneath `GH_IMAGE_EVIDENCE_ROOT` or `--evidence-root`.
+2. Resolves a `user_session` cookie from the configured source (flag → env → browser).
+3. Fetches the target repository's page to obtain an `uploadToken` from the embedded JS payload.
+4. Requests an S3 upload policy from `/upload/policies/assets` using the snapshot's exact size.
+5. Uploads the immutable snapshot directly to S3 using the presigned form fields.
+6. Calls back to GitHub to finalize the image and prints `![name](url)` to stdout.
 
-The final URL is `https://github.com/user-attachments/assets/<uuid>` for images and `https://github.com/user-attachments/files/<id>/<name>` for other files — visibility inherits from the target repository, so a private-repo upload requires authentication to view.
+The final URL is `https://github.com/user-attachments/assets/<uuid>`. Visibility inherits from the target repository, so a private-repo upload requires authentication to view.
 
 For the full architecture, see **[documentation/architecture.md](documentation/architecture.md)**. For the reverse-engineered upload protocol, see **[documentation/github-image-upload-flow.md](documentation/github-image-upload-flow.md)**.
+The Tandem threat model, accepted risks, test counts, cross-build evidence, and live-upload result are recorded in **[documentation/security-validation-2026-07-22.md](documentation/security-validation-2026-07-22.md)**.
 
 ## Requirements
 
 - A supported browser with an active GitHub session — or a `GH_SESSION_TOKEN` for CI.
 - Write access to the target repository (uploads require it).
+- An absolute evidence directory set with `GH_IMAGE_EVIDENCE_ROOT` or `--evidence-root` and one absolute PNG path beneath it.
 - A target repository — pass `--repo owner/repo`, or run from a git workspace whose `origin` remote is on GitHub.
 - The `gh` CLI must be installed and authenticated (used for repository ID lookup).
 
@@ -205,16 +197,6 @@ Issues and pull requests are welcome. For bug reports, please include:
 - The error output (with any session token values redacted)
 
 Before opening a PR, run `go test ./...` and `go vet ./...`.
-
-## Support
-
-If `gh-image` saves you a few drag-and-drops, a ⭐ helps others find it:
-
-```bash
-gh api --method PUT user/starred/drogers0/gh-image
-```
-
-(or just click the star at the [top of this page](https://github.com/drogers0/gh-image))
 
 ## License
 

@@ -6,14 +6,13 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/drogers0/gh-image/internal/httputil"
 )
 
 // uploadToS3 uploads the file to S3 using the presigned form fields from the policy.
-func uploadToS3(policy *policyResponse, filePath, fileName, contentType string) error {
+func uploadToS3(policy *policyResponse, file io.Reader, fileName, contentType string) error {
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
 
@@ -62,13 +61,7 @@ func uploadToS3(policy *policyResponse, filePath, fileName, contentType string) 
 		return fmt.Errorf("creating file field: %w", err)
 	}
 
-	f, err := os.Open(filePath)
-	if err != nil {
-		return fmt.Errorf("opening file: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	if _, err := io.Copy(part, f); err != nil {
+	if _, err := io.Copy(part, file); err != nil {
 		return fmt.Errorf("writing file data: %w", err)
 	}
 

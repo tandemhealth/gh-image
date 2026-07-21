@@ -1,6 +1,6 @@
 module github.com/drogers0/gh-image
 
-go 1.26.1
+go 1.26.5
 
 require github.com/browserutils/kooky v0.2.10
 
@@ -15,6 +15,6 @@ require (
 	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/net v0.50.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
-	golang.org/x/text v0.34.0 // indirect
+	golang.org/x/text v0.39.0 // indirect
 	gopkg.in/ini.v1 v1.67.1 // indirect
 )

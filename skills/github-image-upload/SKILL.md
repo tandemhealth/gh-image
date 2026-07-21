@@ -1,26 +1,24 @@
 ---
 name: github-image-upload
 description: >-
-  Upload local images and other files (PDF, zip, log, …) to GitHub and embed them
-  in a pull request description, an issue, or a comment — producing canonical
-  github.com/user-attachments URLs (private-repo uploads stay private). Use when
+  Upload one agent-generated PNG screenshot to GitHub and embed it in a pull
+  request description, an issue, or a comment — producing a canonical
+  github.com/user-attachments URL (private-repo uploads stay private). Use when
   asked to "attach a screenshot to the PR", "add an image to the PR description",
-  "put this image in the issue", "attach this PDF/log/zip to the issue", "show test
-  results in the PR", "embed before/after screenshots", or any request to visually
-  document or attach files to changes on GitHub. Powered by the `gh-image` gh CLI
-  extension.
+  "put this image in the issue", "show test results in the PR", or "embed a
+  screenshot". Powered by Tandem's locked-down `gh-image` gh CLI extension.
 license: MIT
 ---
 
-# Upload images and files to GitHub (gh-image)
+# Upload one PNG screenshot to GitHub (gh-image)
 
 GitHub has **no public API** for attachment uploads — the web UI uses an internal
 endpoint that mints `user-attachments` URLs scoped to the repo's visibility.
-[`gh-image`](https://github.com/drogers0/gh-image) (MIT, © drogers0) replicates
-that flow as a `gh` CLI extension, so you can upload images or other files (PDF,
-zip, log, …) from the terminal and get a ready-to-paste reference back — an
-`![name](url)` embed for images, a bare URL for videos (GitHub renders it as an
-inline player), or a `[name](url)` download link for other files.
+[`gh-image`](https://github.com/tandemhealth/gh-image) replicates that flow as a
+`gh` CLI extension. The Tandem build accepts exactly one absolute PNG beneath a
+configured evidence directory and returns an `![name](url)` embed. It rejects
+other file types, batches, symlinks, non-regular files, and images over
+10,000,000 bytes before accessing GitHub credentials.
 
 This skill drives `gh-image` and then embeds the result into a PR/issue/comment.
 
@@ -38,7 +36,8 @@ Run these checks; only act on the ones that fail.
 2. **The `gh-image` extension installed** (idempotent — skip if already present)
 
    ```bash
-   gh extension list | grep -q 'drogers0/gh-image' || gh extension install drogers0/gh-image
+   gh extension list | grep -q 'tandemhealth/gh-image' || \
+     gh extension install tandemhealth/gh-image --pin v1.2.0-tandem.1
    ```
 
 3. **A GitHub session for the upload.** `gh-image` does NOT use the `gh` token for
@@ -53,31 +52,30 @@ Run these checks; only act on the ones that fail.
    > ⚠️ A `user_session` cookie grants **full account access** (it is not scoped
    > like a PAT). Treat it like a password; in CI use a dedicated bot account.
 
-## Step 1 — Normalize the file path
+4. **A dedicated evidence directory.** Set `GH_IMAGE_EVIDENCE_ROOT` to the
+   absolute directory where the screenshot harness writes PNGs. Do not set it
+   to `/`, a home directory, or the repository root.
 
-Use an **absolute path**. If a glob is given, resolve it first. Paths with spaces
-or Unicode (e.g. CleanShot's narrow spaces) work, but quote them.
+## Step 1 — Validate the screenshot path
+
+Use exactly one **absolute `.png` path** beneath `GH_IMAGE_EVIDENCE_ROOT`. Do not
+use a glob. The extension snapshots the validated file before network access.
 
 ## Step 2 — Upload
 
 ```bash
-# One or more files (images or PDF/zip/log/…); --repo is optional inside a repo
-# working dir (inferred from the remote).
-gh image "/abs/path/screenshot.png" --repo <owner>/<repo>
+# --repo is optional inside a repository working directory.
+GH_IMAGE_EVIDENCE_ROOT=/abs/path/evidence \
+  gh image "/abs/path/evidence/screenshot.png" --repo <owner>/<repo>
 ```
 
-`gh image` prints the reference to **stdout** — an image embed for images, a bare
-URL for videos (GitHub renders it as an inline player), and a download link for
-other files, e.g.:
+`gh image` prints one image reference to **stdout**:
 
 ```
 ![screenshot.png](https://github.com/user-attachments/assets/<uuid>)
-https://github.com/user-attachments/assets/<uuid>
-[report.pdf](https://github.com/user-attachments/files/<id>/report.pdf)
 ```
 
-Capture that output — it is the embeddable reference. For multiple files it prints
-one line per file.
+Capture that output; it is the embeddable reference.
 
 ## Step 3 — Embed into the PR / issue / comment
 
@@ -86,7 +84,7 @@ one line per file.
 **Append to a PR description** (preserves the existing body):
 
 ```bash
-MD="$(gh image "/abs/path/shot.png" --repo owner/repo)"
+MD="$(GH_IMAGE_EVIDENCE_ROOT=/abs/path/evidence gh image "/abs/path/evidence/shot.png" --repo owner/repo)"
 BODY="$(gh pr view <pr> --repo owner/repo --json body -q .body)"
 printf '%s\n\n## Screenshots\n\n%s\n' "$BODY" "$MD" \
   | gh pr edit <pr> --repo owner/repo --body-file -
@@ -95,7 +93,7 @@ printf '%s\n\n## Screenshots\n\n%s\n' "$BODY" "$MD" \
 **Post as a new PR comment:**
 
 ```bash
-MD="$(gh image "/abs/path/shot.png" --repo owner/repo)"
+MD="$(GH_IMAGE_EVIDENCE_ROOT=/abs/path/evidence gh image "/abs/path/evidence/shot.png" --repo owner/repo)"
 printf '## Screenshots\n\n%s\n' "$MD" | gh pr comment <pr> --repo owner/repo --body-file -
 ```
 
@@ -132,4 +130,6 @@ To control display size, embed an HTML tag instead of the bare markdown:
 | No `user_session` cookie found | Log into GitHub in a supported browser, or set `GH_SESSION_TOKEN`. |
 | Windows + Chrome 127+ can't read cookies | Known cookie-library limitation — use another browser or `GH_SESSION_TOKEN`. |
 | CI / headless run | Set `GH_SESSION_TOKEN` (dedicated bot account); the browser cookie path won't exist. |
+| `evidence root is required` | Set `GH_IMAGE_EVIDENCE_ROOT` to the absolute screenshot output directory. |
+| `outside evidence root`, `symlink`, `regular file`, or `invalid PNG` | Regenerate the screenshot directly inside the evidence directory; do not copy through a symlink. |
 | `gh: command not found` | Install the GitHub CLI (`brew install gh`, etc.). |

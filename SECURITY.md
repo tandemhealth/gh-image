@@ -10,7 +10,7 @@ The cookie grants **full account access** — equivalent to your GitHub password
 
 If you've found a security issue in `gh-image`, please report it **privately** rather than opening a public issue.
 
-Use GitHub's [private vulnerability reporting](https://github.com/drogers0/gh-image/security/advisories/new) to submit the report.
+Use GitHub's [private vulnerability reporting](https://github.com/tandemhealth/gh-image/security/advisories/new) to submit the report.
 
 Please include:
 

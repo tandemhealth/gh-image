@@ -15,7 +15,7 @@ import (
 )
 
 const usage = `Usage:
-  gh image [--repo owner/repo] [--token <value>] <file-path>...
+  gh image [--repo owner/repo] [--token <value>] [--evidence-root <absolute-dir>] <absolute-png-path>
   gh image extract-token
   gh image check-token [--token <value>]
   gh image --version`
@@ -27,14 +27,21 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, productionDeps()))
 }
 
-// uploadFunc uploads one file and returns its markdown reference.
-type uploadFunc func(info *repo.Info, path string) (string, error)
+type uploadInput struct {
+	path     string
+	evidence *upload.Evidence
+}
+
+// uploadFunc uploads one validated evidence snapshot and returns its markdown reference.
+type uploadFunc func(info *repo.Info, input uploadInput) (string, error)
 
 // deps are the I/O boundaries run() depends on; productionDeps wires the real ones,
 // tests inject stubs so the orchestration spine runs without network/subprocess/exit.
 type deps struct {
-	resolveRepo   func(owner, name string) (*repo.Info, error)
-	resolveCookie func(tokenFlag string) (*http.Cookie, error)
+	resolveRepo     func(owner, name string) (*repo.Info, error)
+	resolveCookie   func(tokenFlag string) (*http.Cookie, error)
+	evidenceRootEnv string
+	openEvidence    func(root, path string) (*upload.Evidence, error)
 	// newUploader builds an uploader from a session cookie. It is called once per
 	// run so the underlying HTTP client (and its cookie jar) is shared across all
 	// files, matching the single-client behavior of the original implementation.
@@ -50,10 +57,12 @@ func productionDeps() deps {
 			cookie, _, err := resolveSessionCookie(tokenFlag)
 			return cookie, err
 		},
+		evidenceRootEnv: os.Getenv("GH_IMAGE_EVIDENCE_ROOT"),
+		openEvidence:    upload.OpenEvidence,
 		newUploader: func(cookie *http.Cookie) uploadFunc {
 			client := upload.NewClient(cookie)
-			return func(info *repo.Info, path string) (string, error) {
-				res, err := client.Upload(info.Owner, info.Name, info.ID, path)
+			return func(info *repo.Info, input uploadInput) (string, error) {
+				res, err := client.Upload(info.Owner, info.Name, info.ID, input.evidence)
 				if err != nil {
 					return "", err
 				}
@@ -75,6 +84,8 @@ func run(args []string, stdout, stderr io.Writer, d deps) int {
 	var repoSet bool
 	var tokenFlag string
 	var tokenSet bool
+	var evidenceRootFlag string
+	var evidenceRootSet bool
 	var paths []string
 	var firstPosAfterDoubleDash bool
 
@@ -141,12 +152,39 @@ func run(args []string, stdout, stderr io.Writer, d deps) int {
 				return 1
 			}
 			tokenSet = true
+		case arg == "--evidence-root":
+			if evidenceRootSet {
+				fmt.Fprintf(stderr, "Error: --evidence-root specified more than once\n")
+				return 1
+			}
+			if i+1 >= len(args) {
+				fmt.Fprintf(stderr, "Error: --evidence-root requires an absolute directory\n%s\n", usage)
+				return 1
+			}
+			i++
+			evidenceRootFlag = strings.TrimSpace(args[i])
+			if evidenceRootFlag == "" {
+				fmt.Fprintf(stderr, "Error: --evidence-root value cannot be empty\n%s\n", usage)
+				return 1
+			}
+			evidenceRootSet = true
+		case strings.HasPrefix(arg, "--evidence-root="):
+			if evidenceRootSet {
+				fmt.Fprintf(stderr, "Error: --evidence-root specified more than once\n")
+				return 1
+			}
+			evidenceRootFlag = strings.TrimSpace(strings.SplitN(arg, "=", 2)[1])
+			if evidenceRootFlag == "" {
+				fmt.Fprintf(stderr, "Error: --evidence-root value cannot be empty\n%s\n", usage)
+				return 1
+			}
+			evidenceRootSet = true
 		case arg == "--version":
 			fmt.Fprintf(stdout, "gh-image %s\n", version)
 			return 0
 		case arg == "--help" || arg == "-h":
 			fmt.Fprintf(stdout, "%s\n\n", usage)
-			fmt.Fprintln(stdout, "Upload images and files to GitHub and print markdown references.")
+			fmt.Fprintln(stdout, "Upload one validated PNG screenshot to GitHub and print its markdown reference.")
 			fmt.Fprintln(stdout)
 			fmt.Fprintln(stdout, "The --repo flag is optional. If omitted, the repository is")
 			fmt.Fprintln(stdout, "inferred from the git remote in the current directory.")
@@ -157,14 +195,15 @@ func run(args []string, stdout, stderr io.Writer, d deps) int {
 			fmt.Fprintln(stdout, "                      Can also be set via GH_SESSION_TOKEN environment variable")
 			fmt.Fprintln(stdout, "                      WARNING: --token values are visible in process listings.")
 			fmt.Fprintln(stdout, "                      Prefer GH_SESSION_TOKEN on shared machines.")
+			fmt.Fprintln(stdout, "  --evidence-root     Absolute directory that contains the screenshot")
+			fmt.Fprintln(stdout, "                      Defaults to GH_IMAGE_EVIDENCE_ROOT")
 			fmt.Fprintln(stdout, "  --version           Print version and exit")
 			fmt.Fprintln(stdout)
 			fmt.Fprintln(stdout, "Subcommands:")
 			fmt.Fprintln(stdout, "  extract-token       Extract session token from browser and print to stdout")
 			fmt.Fprintln(stdout, "  check-token         Verify a session token is valid and print username to stdout")
 			fmt.Fprintln(stdout)
-			fmt.Fprintln(stdout, "Use -- to separate flags from filenames starting with a dash:")
-			fmt.Fprintln(stdout, "  gh image -- -screenshot.png")
+			fmt.Fprintln(stdout, "The PNG path and evidence root must both be absolute.")
 			return 0
 		case strings.HasPrefix(arg, "-") && arg != "-":
 			fmt.Fprintf(stderr, "Error: unknown flag %s\n", arg)
@@ -179,7 +218,7 @@ func run(args []string, stdout, stderr io.Writer, d deps) int {
 	}
 
 	// Dispatch subcommands before any other validation.
-	subcommand, dispatchErr := classifySubcommand(paths, firstPosAfterDoubleDash, tokenFlag, repoSet)
+	subcommand, dispatchErr := classifySubcommand(paths, firstPosAfterDoubleDash, tokenFlag, repoSet, evidenceRootSet)
 	if dispatchErr != nil {
 		fmt.Fprintf(stderr, "Error: %v\n", dispatchErr)
 		var ue *usageError
@@ -215,13 +254,31 @@ func run(args []string, stdout, stderr io.Writer, d deps) int {
 		fmt.Fprintf(stderr, "%s\nRun 'gh image --help' for usage.\n", usage)
 		return 1
 	}
+	if len(paths) != 1 {
+		fmt.Fprintf(stderr, "Error: exactly one PNG path is required, got %d\n%s\n", len(paths), usage)
+		return 1
+	}
+	if paths[0] == "" {
+		fmt.Fprintf(stderr, "Error: empty PNG path\n")
+		return 1
+	}
 
-	// Validate file paths early
-	for _, p := range paths {
-		if p == "" {
-			fmt.Fprintf(stderr, "Error: empty file path\n")
-			return 1
-		}
+	evidenceRoot := evidenceRootFlag
+	if !evidenceRootSet {
+		evidenceRoot = strings.TrimSpace(d.evidenceRootEnv)
+	}
+	if evidenceRoot == "" {
+		fmt.Fprintln(stderr, "Error: evidence root is required; set --evidence-root or GH_IMAGE_EVIDENCE_ROOT")
+		return 1
+	}
+	if d.openEvidence == nil {
+		fmt.Fprintln(stderr, "Error: evidence validator is unavailable")
+		return 1
+	}
+	evidence, err := d.openEvidence(evidenceRoot, paths[0])
+	if err != nil {
+		fmt.Fprintf(stderr, "Error validating screenshot: %v\n", err)
+		return 1
 	}
 
 	// Resolve repository
@@ -252,23 +309,16 @@ func run(args []string, stdout, stderr io.Writer, d deps) int {
 		return 1
 	}
 
-	// Build the uploader once so its HTTP client/cookie jar is shared across files.
+	// Build the uploader after evidence validation and session resolution.
 	uploadFile := d.newUploader(cookie)
 
-	// Upload each file, continuing on error
-	hasError := false
-	for _, path := range paths {
-		markdown, err := uploadFile(repoInfo, path)
-		if err != nil {
-			fmt.Fprintf(stderr, "Error uploading %s: %v\n", path, err)
-			hasError = true
-			continue
-		}
-		fmt.Fprintln(stdout, markdown)
-	}
-	if hasError {
+	input := uploadInput{path: paths[0], evidence: evidence}
+	markdown, err := uploadFile(repoInfo, input)
+	if err != nil {
+		fmt.Fprintf(stderr, "Error uploading %s: %v\n", paths[0], err)
 		return 1
 	}
+	fmt.Fprintln(stdout, markdown)
 	return 0
 }
 
@@ -279,7 +329,7 @@ func (e *usageError) Error() string { return e.err.Error() }
 
 // classifySubcommand identifies whether the parsed positional args represent a
 // supported subcommand invocation and validates subcommand-specific constraints.
-func classifySubcommand(paths []string, firstPosAfterDoubleDash bool, tokenFlag string, repoSet bool) (string, error) {
+func classifySubcommand(paths []string, firstPosAfterDoubleDash bool, tokenFlag string, repoSet, evidenceRootSet bool) (string, error) {
 	if len(paths) == 0 || firstPosAfterDoubleDash {
 		return "", nil
 	}
@@ -294,6 +344,9 @@ func classifySubcommand(paths []string, firstPosAfterDoubleDash bool, tokenFlag 
 		if repoSet {
 			return "", fmt.Errorf("--repo cannot be combined with extract-token")
 		}
+		if evidenceRootSet {
+			return "", fmt.Errorf("--evidence-root cannot be combined with extract-token")
+		}
 		return "extract-token", nil
 	case "check-token":
 		if len(paths) > 1 {
@@ -301,6 +354,9 @@ func classifySubcommand(paths []string, firstPosAfterDoubleDash bool, tokenFlag 
 		}
 		if repoSet {
 			return "", fmt.Errorf("--repo cannot be combined with check-token")
+		}
+		if evidenceRootSet {
+			return "", fmt.Errorf("--evidence-root cannot be combined with check-token")
 		}
 		return "check-token", nil
 	default:

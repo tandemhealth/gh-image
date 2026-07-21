@@ -22,12 +22,16 @@ func okDeps() deps {
 		resolveCookie: func(tokenFlag string) (*http.Cookie, error) {
 			return &http.Cookie{Name: "user_session", Value: "tok"}, nil
 		},
+		evidenceRootEnv: "/evidence",
+		openEvidence: func(root, path string) (*upload.Evidence, error) {
+			return nil, nil
+		},
 		newUploader: func(cookie *http.Cookie) uploadFunc {
 			// The stub returns image-embed markdown for any path; run()'s job is the
 			// orchestration spine, not the embed-vs-link decision (that lives in
 			// upload.renderMarkdown and is covered by TestRenderMarkdown).
-			return func(info *repo.Info, path string) (string, error) {
-				return "![" + path + "](url)", nil
+			return func(info *repo.Info, input uploadInput) (string, error) {
+				return "![" + input.path + "](url)", nil
 			}
 		},
 		extractToken: func() (string, error) { return "extracted-token", nil },
@@ -312,7 +316,10 @@ func TestRun_FlagErrors(t *testing.T) {
 		{"token missing value", []string{"--token"}, "requires a value"},
 		{"token empty value", []string{"--token", "   "}, "cannot be empty"},
 		{"no args shows usage", nil, "Usage:"},
-		{"empty file path", []string{""}, "empty file path"},
+		{"empty file path", []string{""}, "empty PNG path"},
+		{"evidence root twice", []string{"--evidence-root", "/a", "--evidence-root", "/b", "a.png"}, "specified more than once"},
+		{"evidence root missing value", []string{"--evidence-root"}, "requires an absolute directory"},
+		{"evidence root empty", []string{"--evidence-root="}, "value cannot be empty"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -385,32 +392,76 @@ func TestRun_Upload(t *testing.T) {
 			t.Fatalf("code=%d out=%q", code, out)
 		}
 	})
-	t.Run("multiple files print one line each", func(t *testing.T) {
-		code, out, _ := runWith(t, []string{"a.png", "b.png"}, okDeps())
-		lines := strings.Split(strings.TrimSpace(out), "\n")
-		if code != 0 || len(lines) != 2 {
-			t.Fatalf("code=%d out=%q", code, out)
+	t.Run("multiple files are rejected before dependencies", func(t *testing.T) {
+		d := okDeps()
+		d.openEvidence = func(string, string) (*upload.Evidence, error) {
+			t.Fatal("openEvidence called for a batch upload")
+			return nil, nil
+		}
+		code, _, errOut := runWith(t, []string{"a.png", "b.png"}, d)
+		if code != 1 || !strings.Contains(errOut, "exactly one PNG path is required, got 2") {
+			t.Fatalf("code=%d stderr=%q", code, errOut)
 		}
 	})
-	t.Run("partial failure exits 1 but prints successes", func(t *testing.T) {
+	t.Run("upload failure exits 1", func(t *testing.T) {
 		d := okDeps()
 		d.newUploader = func(c *http.Cookie) uploadFunc {
-			return func(info *repo.Info, p string) (string, error) {
-				if p == "bad.png" {
-					return "", fmt.Errorf("upload failed")
-				}
-				return "![" + p + "](url)", nil
+			return func(info *repo.Info, input uploadInput) (string, error) {
+				return "", fmt.Errorf("upload failed")
 			}
 		}
-		code, out, errOut := runWith(t, []string{"good.png", "bad.png"}, d)
+		code, out, errOut := runWith(t, []string{"bad.png"}, d)
 		if code != 1 {
 			t.Fatalf("code = %d, want 1", code)
 		}
-		if !strings.Contains(out, "![good.png](url)") {
-			t.Errorf("stdout missing success line: %q", out)
+		if out != "" {
+			t.Errorf("stdout = %q, want empty", out)
 		}
 		if !strings.Contains(errOut, "Error uploading bad.png") {
 			t.Errorf("stderr missing failure: %q", errOut)
+		}
+	})
+	t.Run("missing evidence root fails before dependencies", func(t *testing.T) {
+		d := okDeps()
+		d.evidenceRootEnv = ""
+		d.openEvidence = func(string, string) (*upload.Evidence, error) {
+			t.Fatal("openEvidence called without a configured root")
+			return nil, nil
+		}
+		code, _, errOut := runWith(t, []string{"a.png"}, d)
+		if code != 1 || !strings.Contains(errOut, "evidence root is required") {
+			t.Fatalf("code=%d stderr=%q", code, errOut)
+		}
+	})
+	t.Run("flag evidence root overrides the environment", func(t *testing.T) {
+		d := okDeps()
+		d.evidenceRootEnv = "/from-env"
+		var gotRoot string
+		d.openEvidence = func(root, path string) (*upload.Evidence, error) {
+			gotRoot = root
+			return nil, nil
+		}
+		code, _, errOut := runWith(t, []string{"--evidence-root", "/from-flag", "a.png"}, d)
+		if code != 0 || errOut != "" || gotRoot != "/from-flag" {
+			t.Fatalf("code=%d stderr=%q root=%q", code, errOut, gotRoot)
+		}
+	})
+	t.Run("invalid evidence fails before repo and cookie resolution", func(t *testing.T) {
+		d := okDeps()
+		d.openEvidence = func(string, string) (*upload.Evidence, error) {
+			return nil, fmt.Errorf("outside evidence root")
+		}
+		d.resolveRepo = func(string, string) (*repo.Info, error) {
+			t.Fatal("resolveRepo called after evidence validation failed")
+			return nil, nil
+		}
+		d.resolveCookie = func(string) (*http.Cookie, error) {
+			t.Fatal("resolveCookie called after evidence validation failed")
+			return nil, nil
+		}
+		code, _, errOut := runWith(t, []string{"a.png"}, d)
+		if code != 1 || !strings.Contains(errOut, "outside evidence root") {
+			t.Fatalf("code=%d stderr=%q", code, errOut)
 		}
 	})
 	t.Run("resolveRepo error exits 1", func(t *testing.T) {
@@ -441,21 +492,21 @@ func TestRun_Upload(t *testing.T) {
 			t.Errorf("resolveRepo got %q/%q, want acme/widgets", gotOwner, gotName)
 		}
 	})
-	t.Run("-- terminator treats dash-file as a path and infers repo", func(t *testing.T) {
+	t.Run("-- terminator treats the following absolute PNG as a path and infers repo", func(t *testing.T) {
 		var gotOwner, gotName string
 		d := okDeps()
 		d.resolveRepo = func(owner, name string) (*repo.Info, error) {
 			gotOwner, gotName = owner, name
 			return &repo.Info{Owner: "octo", Name: "hello", ID: 1}, nil
 		}
-		code, out, _ := runWith(t, []string{"--", "-shot.png"}, d)
+		code, out, _ := runWith(t, []string{"--", "/evidence/shot.png"}, d)
 		if code != 0 {
 			t.Fatalf("code = %d, want 0", code)
 		}
 		if gotOwner != "" || gotName != "" {
 			t.Errorf("expected inference path (empty owner/name), got %q/%q", gotOwner, gotName)
 		}
-		if !strings.Contains(out, "![-shot.png](url)") {
+		if !strings.Contains(out, "![/evidence/shot.png](url)") {
 			t.Errorf("stdout = %q", out)
 		}
 	})
@@ -494,7 +545,7 @@ func TestResolveSessionCookie_NilGetter(t *testing.T) {
 
 func TestProductionDeps_WiringComplete(t *testing.T) {
 	d := productionDeps()
-	if d.resolveRepo == nil || d.resolveCookie == nil || d.newUploader == nil || d.extractToken == nil || d.checkToken == nil {
+	if d.resolveRepo == nil || d.resolveCookie == nil || d.openEvidence == nil || d.newUploader == nil || d.extractToken == nil || d.checkToken == nil {
 		t.Fatal("productionDeps left a boundary unwired")
 	}
 }
@@ -571,7 +622,7 @@ func TestClassifySubcommand(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			gotSubcommand, err := classifySubcommand(tc.paths, tc.firstPosAfterDoubleDash, tc.tokenFlag, tc.repoSet)
+			gotSubcommand, err := classifySubcommand(tc.paths, tc.firstPosAfterDoubleDash, tc.tokenFlag, tc.repoSet, false)
 			if tc.wantErrContains != "" {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil", tc.wantErrContains)

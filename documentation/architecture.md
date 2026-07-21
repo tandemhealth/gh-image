@@ -2,7 +2,7 @@
 
 ## Overview
 
-`gh-image` is a Go CLI tool distributed as a `gh` extension. It uploads files — images and other GitHub-supported attachments like PDFs and zips — to GitHub using the same internal API that the web UI uses when you drag-and-drop or paste an attachment. The tool resolves a GitHub session (from a flag, env var, or browser cookie store), negotiates upload tokens, performs an S3 presigned upload, then prints the resulting markdown reference to stdout (an image embed for images, a download link for other files).
+`gh-image` is a Go CLI tool distributed as a `gh` extension. The Tandem build uploads exactly one PNG screenshot through the internal API used by GitHub's drag-and-drop UI. Before it reads GitHub credentials, it verifies the absolute path is beneath a configured evidence directory, rejects symlinks and non-regular files, validates the PNG, enforces a 10,000,000-byte limit, and snapshots the bytes. It then negotiates an upload policy, sends that snapshot to S3, finalizes the image, and prints one markdown embed.
 
 ## Project Structure
 
@@ -24,6 +24,8 @@ gh-image/
 │   ├── httputil/
 │   │   └── httputil.go              # Shared User-Agent constant
 │   ├── upload/
+│   │   ├── evidence.go              # Path lockdown, PNG validation, immutable snapshot
+│   │   ├── evidence_test.go
 │   │   ├── upload.go                # Orchestrates the 3-step upload flow + HTTP client
 │   │   ├── upload_test.go
 │   │   ├── token.go                 # Fetches uploadToken from repo page
@@ -34,7 +36,8 @@ gh-image/
 │       └── repo_test.go
 ├── documentation/
 │   ├── architecture.md              # This file
-│   └── github-image-upload-flow.md  # Reverse-engineered upload protocol
+│   ├── github-image-upload-flow.md  # Reverse-engineered upload protocol
+│   └── security-validation-2026-07-22.md
 └── .github/
     └── workflows/
         └── release.yml              # GoReleaser cross-compilation + release
@@ -43,12 +46,12 @@ gh-image/
 ## CLI Surface
 
 ```
-gh image [--repo owner/repo] [--token <value>] <file-path>...
+gh image [--repo owner/repo] [--token <value>] [--evidence-root <absolute-dir>] <absolute-png-path>
 gh image extract-token
 gh image check-token [--token <value>]
 ```
 
-- **Default mode** uploads one or more files and prints markdown references to stdout. Flags may appear before or after positional args; use `--` to pass filenames that begin with `-`.
+- **Default mode** validates and uploads exactly one absolute PNG path. `GH_IMAGE_EVIDENCE_ROOT` supplies the allowed directory unless `--evidence-root` is present. Flags may appear before or after the positional path.
 - **`extract-token`** reads the session cookie from the browser and prints the raw token value to stdout (status info to stderr). Useful for piping into CI secrets.
 - **`check-token`** resolves a token using the standard precedence (flag → env → browser) and verifies it against GitHub, printing the authenticated username on success.
 
@@ -135,9 +138,11 @@ unit-testable without a real git repo or authenticated `gh`.
 func Resolve(owner, name string) (*Info, error)
 ```
 
-### 6. Upload Flow (`internal/upload/`)
+### 6. Evidence Validation and Upload (`internal/upload/`)
 
-Implements the 3-step upload protocol documented in [github-image-upload-flow.md](github-image-upload-flow.md). All GitHub-bound requests use a shared `http.Client` whose cookie jar is built by `cookies.NewGitHubCookieJar`, so `_gh_sess` rotation is handled automatically.
+`OpenEvidence` runs before repository lookup, cookie access, or network I/O. It requires absolute root and input paths, uses `filepath.Rel` for containment, rejects symlinks with `os.Root.Lstat`, opens the file through `os.Root`, verifies the opened inode with `os.SameFile`, reads at most 10,000,001 bytes, and validates both the PNG signature and PNG header structure. The returned `Evidence` holds an immutable byte snapshot, basename, and exact size.
+
+The remaining code implements the 3-step upload protocol documented in [github-image-upload-flow.md](github-image-upload-flow.md). All GitHub-bound requests use a shared `http.Client` whose cookie jar is built by `cookies.NewGitHubCookieJar`, so `_gh_sess` rotation is handled automatically.
 
 All GitHub requests are issued through a `*Client` that carries the cookie-jar
 HTTP client plus a `baseURL` (production `https://github.com`); tests point
@@ -148,9 +153,9 @@ HTTP client plus a `baseURL` (production `https://github.com`); tests point
 // production base URL.
 func NewClient(sessionCookie *http.Cookie) *Client
 
-// Upload uploads a file to GitHub and returns the asset URL,
+// Upload uploads validated evidence to GitHub and returns the asset URL,
 // sanitized filename, and a ready-to-paste markdown reference.
-func (c *Client) Upload(owner, repo string, repoID int, path string) (*Result, error)
+func (c *Client) Upload(owner, repo string, repoID int, evidence *Evidence) (*Result, error)
 ```
 
 #### Token Retrieval (`token.go`)
@@ -165,7 +170,7 @@ func (c *Client) getUploadToken(owner, repo string) (string, error)
 
 #### Upload Orchestration (`upload.go`)
 
-Coordinates the full flow for a single file:
+Coordinates the full flow for one validated PNG snapshot:
 
 ```
 Get upload token
@@ -181,7 +186,7 @@ uploadToS3()           ──→  POST {s3_upload_url}
         ▼
 finalizeUpload()       ──→  PUT {asset_upload_url}
         │                    Path from policy: /upload/assets/{id} (images)
-        │                    or /upload/repository-files/{id} (other files)
+		│                    /upload/assets/{id}
         │                    Uses asset_upload_authenticity_token from step 1
         ▼
     Returns asset href URL
@@ -212,16 +217,18 @@ Responsibilities:
 - **Manual arg parsing** so that flags can appear before or after positional args, with `--` as an explicit terminator for filenames starting with a dash.
 - **Subcommand dispatch** for `extract-token` and `check-token`, with validation that disallowed flag combinations are rejected before any work is done.
 - **Session resolution** via `resolveSessionCookie`, which applies the flag → env → browser precedence and wraps raw token values into a properly scoped `*http.Cookie`.
-- **Multi-file upload loop**: each positional path is uploaded independently. A failure on one file is reported to stderr and the loop continues; the process exits non-zero if any upload failed.
+- **Fail-closed evidence validation** before repository resolution or session-cookie access.
+- **Single upload**: batches are rejected; one validation or upload failure exits non-zero.
 
 ## Data Flow
 
 ```mermaid
 flowchart TD
-    Start(["<b>User:</b> gh image screenshot.png another.png --repo o/r"])
+    Start(["<b>User:</b> gh image /evidence/screenshot.png --repo o/r"])
+    Validate["<b>Validate and snapshot</b><br/>absolute PNG under evidence root<br/><i>≤ 10,000,000 bytes</i>"]
     Session["<b>Resolve Session</b><br/>flag → env → browser<br/><i>(kooky for browser)</i>"]
 
-    Start --> Session
+    Start --> Validate --> Session
 
     subgraph PerImage ["For each file"]
         direction TB
@@ -275,7 +282,7 @@ git push --tags
 → GitHub Actions triggers
   → GoReleaser cross-compiles
   → Attaches binaries to GitHub Release
-→ Users: gh extension install drogers0/gh-image
+→ Users: gh extension install tandemhealth/gh-image --pin vX.Y.Z-tandem.N
 ```
 
 ## Dependencies
@@ -295,7 +302,6 @@ git push --tags
 - **Windows:** Supported via kooky (DPAPI for Chromium-family cookie decryption). Binaries are built for Windows amd64.
 - **CI / headless environments:** Use `GH_SESSION_TOKEN` (preferred) or `--token` to skip browser extraction entirely.
 
-## Future Considerations
+## Security Boundary
 
-- **Clipboard image support:** Accept image data from clipboard (`gh image paste --repo o/r`) instead of requiring a file path.
-- **Token caching:** The `uploadToken` could be cached briefly to avoid fetching the repo page on every upload within a multi-file batch. The presigned S3 policy expires in ~30 minutes, so reuse is safe within that window.
+The configured evidence root prevents accidental uploads outside the screenshot directory. It is not a security boundary against a process that can replace `GH_IMAGE_EVIDENCE_ROOT`, change command-line arguments, or create hard links. The immutable snapshot prevents later path replacement or same-inode writes from changing the bytes covered by GitHub's upload policy.

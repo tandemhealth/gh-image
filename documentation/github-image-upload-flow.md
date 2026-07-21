@@ -2,7 +2,7 @@
 
 ## Overview
 
-GitHub does not provide a public API for uploading attachments (images or files like PDFs and zips) to issues/PRs. The web UI uses an internal 3-step flow involving GitHub's servers and S3. This document describes exactly how that flow works, reverse-engineered from HAR captures. The flow is identical for images and other files; only the finalize path and the resulting URL/markdown differ (noted in Step 3 and Final Result).
+GitHub does not provide a public API for uploading attachments to issues or pull requests. The web UI uses an internal 3-step flow involving GitHub's servers and S3. This document describes that reverse-engineered protocol. GitHub's web endpoint accepts several attachment types, but the Tandem `gh-image` client permits only one validated PNG screenshot per invocation.
 
 Attachments uploaded this way are scoped to the repository's visibility — private repo uploads require authentication to view (unlike GitHub Release assets, which are always public on public repos).
 
@@ -133,10 +133,9 @@ This token serves as the `authenticity_token` for the upload policy request (Ste
 
 **Request:** `PUT https://github.com{asset_upload_url}`
 
-Where `asset_upload_url` is taken verbatim from the Step 1 response. GitHub routes the
-finalize to a different path per file type: `/upload/assets/{id}` for images and
-`/upload/repository-files/{id}` for other files (PDF, zip, …). Use the server-provided
-path rather than hardcoding one.
+Where `asset_upload_url` is taken verbatim from the Step 1 response. PNG images use
+`/upload/assets/{id}`. The client still consumes the server-provided path instead of
+constructing it locally.
 
 **Content-Type:** `multipart/form-data`
 
@@ -166,17 +165,14 @@ path rather than hardcoding one.
 
 ## Final Result
 
-The `href` value is the permanent attachment URL. Its shape depends on the file type:
+The `href` value is the permanent attachment URL:
 ```
-https://github.com/user-attachments/assets/{uuid}        # images
-https://github.com/user-attachments/files/{id}/{name}    # other files (PDF, zip, …)
+https://github.com/user-attachments/assets/{uuid}
 ```
 
-It can be referenced in any GitHub markdown (PR descriptions, issue bodies, comments). Images
-embed inline; other files render as a download link:
+It can be referenced in any GitHub markdown (PR descriptions, issue bodies, comments):
 ```markdown
 ![alt text](https://github.com/user-attachments/assets/{uuid})
-[report.pdf](https://github.com/user-attachments/files/{id}/report.pdf)
 ```
 
 ## Authentication Summary
