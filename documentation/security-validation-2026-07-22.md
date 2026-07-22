@@ -23,8 +23,9 @@ Verification results:
 - golangci-lint 2.12.2: 0 issues.
 - govulncheck 1.6.0 with Go 1.26.5: 0 reachable vulnerabilities.
 - Release cross-build matrix: macOS amd64/arm64, Linux amd64/arm64, Windows amd64, and Android arm64. Two clean builds produced identical SHA-256 values for all 6 binaries; released binary metadata reports Go 1.26.5, revision `0a3e057cd685abbc8ad7afb428e338c13cf2fc70`, and `vcs.modified=false`. The release includes the six values in [`checksums.txt`](https://github.com/tandemhealth/gh-image/releases/download/v1.2.0-tandem.1/checksums.txt).
-- Installed release: `gh extension list` reports `tandemhealth/gh-image v1.2.0-tandem.1`, and `gh image --version` reports `gh-image v1.2.0-tandem.1`.
-- Live synthetic upload through that installed release: `validation.png` produced [a repository-scoped GitHub user attachment](https://github.com/user-attachments/assets/d637f40c-a117-4112-b72b-375a8c4badf2).
+- Clean reinstall: removing `gh image`, then running `gh extension install tandemhealth/gh-image --pin v1.2.0-tandem.1`, succeeded. `gh extension list` reports `tandemhealth/gh-image v1.2.0-tandem.1`, and `gh image --version` reports `gh-image v1.2.0-tandem.1`.
+- Live synthetic upload after that clean reinstall: `validation.png` produced [a repository-scoped GitHub user attachment](https://github.com/user-attachments/assets/4597b2b1-5dbb-495f-ba59-a086747529d2).
+- Binary provenance: the Git tree contains 0 executable binaries and 0 Git LFS objects. `banner.png` (600×200 PNG) is the only tracked non-text file. `dist/` is ignored and contains only local audit/rebuild outputs. The organization repository has 1 release: `v1.2.0-tandem.1`, whose 6 executable assets match the locally generated SHA-256 values in its seventh asset, `checksums.txt`.
 
 The validation keeps four explicitly accepted behaviors unchanged:
 

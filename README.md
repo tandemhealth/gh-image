@@ -30,6 +30,8 @@ Install the reviewed Tandem release at the exact validated version:
 gh extension install tandemhealth/gh-image --pin v1.2.0-tandem.1
 ```
 
+The Git tree contains no executable binaries or Git LFS objects. `banner.png` is the only tracked non-text file. Prebuilt executables exist only as the six checksum-published assets on the pinned GitHub Release.
+
 <details>
 <summary>Build from source</summary>
 
