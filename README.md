@@ -91,11 +91,18 @@ Happens consistently after the third click."
 
 `gh-image` is packaged as an [agent skill](https://agentskills.io), so AI coding agents can upload and embed synthetic screenshots without a per-upload browser interaction.
 
+Share this setup block with developers who use Codex, Claude Code, Cursor, or another Agent Skills client:
+
 ```bash
-npx skills add tandemhealth/gh-image
+npx --yes playwright install chromium
+gh auth status --hostname github.com
+gh extension install tandemhealth/gh-image --pin v1.2.0-tandem.2
+npx --yes skills@1.5.9 add tandemhealth/gh-image --global --skill github-image-upload --agent '*' --yes
 ```
 
-The open [Agent Skills standard](https://agentskills.io/clients) is supported by **Claude Code**, **OpenAI Codex**, **Cursor**, **GitHub Copilot**, and [many more](https://agentskills.io/clients). The skill walks the agent through installing this extension (if needed), running the upload, and embedding the resulting `user-attachments` URL into a PR, issue, or comment.
+If `gh auth status` fails, run `gh auth login --hostname github.com`. Restart the agent after the skill is installed so it discovers `github-image-upload`. The Playwright command installs Chromium for screenshot capture; the `gh extension` command installs the uploader; the final command registers the upload workflow globally for every detected agent.
+
+The open [Agent Skills standard](https://agentskills.io/clients) is supported by **Claude Code**, **OpenAI Codex**, **Cursor**, **GitHub Copilot**, and [many more](https://agentskills.io/clients). The skill walks the agent through checking the pinned extension, running the upload, and embedding the resulting `user-attachments` URL into a PR, issue, or comment.
 
 ## Authentication
 
