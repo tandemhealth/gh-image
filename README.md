@@ -184,7 +184,7 @@ jobs:
 The final URL is `https://github.com/user-attachments/assets/<uuid>`. Visibility inherits from the target repository, so a private-repo upload requires authentication to view.
 
 For the full architecture, see **[documentation/architecture.md](documentation/architecture.md)**. For the reverse-engineered upload protocol, see **[documentation/github-image-upload-flow.md](documentation/github-image-upload-flow.md)**.
-The Tandem threat model, accepted risks, test counts, cross-build evidence, and live-upload result are recorded in **[documentation/security-validation-2026-07-22.md](documentation/security-validation-2026-07-22.md)**.
+The Tandem threat model and accepted risks are recorded in **[documentation/security-validation-2026-07-22.md](documentation/security-validation-2026-07-22.md)**. The clean `.2` install, rejection checks, binary hashes, and rendered live-upload evidence are recorded in **[documentation/v1.2.0-tandem.2-validation.md](documentation/v1.2.0-tandem.2-validation.md)**.
 
 ## Requirements
 
