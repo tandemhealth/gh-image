@@ -91,16 +91,17 @@ Happens consistently after the third click."
 
 `gh-image` is packaged as an [agent skill](https://agentskills.io), so AI coding agents can upload and embed synthetic screenshots without a per-upload browser interaction.
 
-Share this setup block with developers who use Codex, Claude Code, Cursor, or another Agent Skills client:
+Share this setup block with developers who use Codex or Claude Code:
 
 ```bash
-npx --yes playwright install chromium
 gh auth status --hostname github.com
 gh extension install tandemhealth/gh-image --pin v1.2.0-tandem.2
-npx --yes skills@1.5.9 add tandemhealth/gh-image --global --skill github-image-upload --agent '*' --yes
+npx --yes skills@1.5.9 add tandemhealth/gh-image --global --skill github-image-upload --agent codex --agent claude-code --yes
 ```
 
-If `gh auth status` fails, run `gh auth login --hostname github.com`. Restart the agent after the skill is installed so it discovers `github-image-upload`. The Playwright command installs Chromium for screenshot capture; the `gh extension` command installs the uploader; the final command registers the upload workflow globally for every detected agent.
+If `gh auth status` fails, run `gh auth login --hostname github.com`. Restart Codex and Claude Code after the skill is installed so they discover `github-image-upload`. The `gh extension` command installs the uploader; the final command registers the upload workflow globally for both agents.
+
+Install screenshot browsers through the target repository's lockfile and setup command; do not run an unpinned `npx playwright install` from an arbitrary directory. For `tandemhealth/playground`, run `just visum setup-browser` from the repository root.
 
 The open [Agent Skills standard](https://agentskills.io/clients) is supported by **Claude Code**, **OpenAI Codex**, **Cursor**, **GitHub Copilot**, and [many more](https://agentskills.io/clients). The skill walks the agent through checking the pinned extension, running the upload, and embedding the resulting `user-attachments` URL into a PR, issue, or comment.
 
