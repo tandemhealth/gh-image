@@ -8,10 +8,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/drogers0/gh-image/internal/cookies"
-	"github.com/drogers0/gh-image/internal/repo"
-	"github.com/drogers0/gh-image/internal/session"
-	"github.com/drogers0/gh-image/internal/upload"
+	"github.com/tandemhealth/gh-image/internal/cookies"
+	"github.com/tandemhealth/gh-image/internal/repo"
+	"github.com/tandemhealth/gh-image/internal/session"
+	"github.com/tandemhealth/gh-image/internal/upload"
 )
 
 const usage = `Usage:

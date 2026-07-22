@@ -1,10 +1,6 @@
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/d3455b90-f94f-4013-a00a-ebaff090635e" alt="gh-image banner" width="640">
-</p>
+# gh-image
 
-<p align="center">
-  <em>Attach agent-generated PNG screenshots to GitHub issues and pull requests.</em>
-</p>
+Attach agent-generated PNG screenshots to GitHub issues and pull requests.
 
 <p align="center">
   <a href="https://github.com/tandemhealth/gh-image/releases/latest"><img src="https://img.shields.io/github/v/release/tandemhealth/gh-image?color=blue" alt="Latest release"></a>
@@ -22,15 +18,26 @@ $ GH_IMAGE_EVIDENCE_ROOT=/absolute/evidence \
 ![screenshot.png](https://github.com/user-attachments/assets/88f4599a-…-bc24)
 ```
 
-## Installation
+## Install
 
-Install the reviewed Tandem release at the exact validated version:
+New installation:
 
 ```bash
-gh extension install tandemhealth/gh-image --pin v1.2.0-tandem.1
+gh extension install tandemhealth/gh-image --pin v1.2.0-tandem.2
+gh image --version
 ```
 
-The Git tree contains no executable binaries or Git LFS objects. `banner.png` is the only tracked non-text file. Prebuilt executables exist only as the six checksum-published assets on the pinned GitHub Release.
+Replace an existing installation:
+
+```bash
+gh extension remove image
+gh extension install tandemhealth/gh-image --pin v1.2.0-tandem.2
+gh image --version
+```
+
+Expected output: `gh-image v1.2.0-tandem.2`.
+
+The Git tree contains no executable binaries, binary assets, or Git LFS objects. Prebuilt executables exist only as the six checksum-published assets on the pinned GitHub Release.
 
 <details>
 <summary>Build from source</summary>
@@ -101,7 +108,7 @@ The open [Agent Skills standard](https://agentskills.io/clients) is supported by
 On macOS, a Keychain prompt may appear on first use to authorize access to your browser's cookie encryption key. Click **Always Allow** to skip future prompts.
 
 > [!NOTE]
-> **When browser cookies aren't available:** Chrome 127+ on Windows isn't yet supported by the underlying cookie library ([workarounds](https://github.com/drogers0/gh-image/issues/4)), and Android (Termux) has no browser cookie store at all. In either case, supply the token explicitly via `GH_SESSION_TOKEN` (see [Session token override](#session-token-override) below); on Windows you can also just use another browser.
+> **When browser cookies aren't available:** Chrome 127+ on Windows is not supported by the current cookie library, and Android (Termux) has no browser cookie store. Supply the token explicitly via `GH_SESSION_TOKEN` (see [Session token override](#session-token-override)); on Windows you can also use another browser.
 
 ### Session token override
 
@@ -115,14 +122,17 @@ For CI, headless environments, or shared machines, you can supply the session to
 
 ```bash
 # Flag (visible in process listings like `ps aux` — avoid on shared machines)
-gh image --token "$MY_TOKEN" screenshot.png --repo owner/repo
+GH_IMAGE_EVIDENCE_ROOT=/absolute/evidence \
+  gh image --token "$MY_TOKEN" /absolute/evidence/screenshot.png --repo owner/repo
 
 # Environment variable (preferred — not visible to `ps aux`)
-GH_SESSION_TOKEN="$MY_TOKEN" gh image screenshot.png --repo owner/repo
+GH_SESSION_TOKEN="$MY_TOKEN" GH_IMAGE_EVIDENCE_ROOT=/absolute/evidence \
+  gh image /absolute/evidence/screenshot.png --repo owner/repo
 
 # Non-standard browser not auto-detected (Firefox forks like Floorp/LibreWolf)?
 GH_SESSION_TOKEN="$(sqlite3 ~/path/to/profile/cookies.sqlite "SELECT value FROM moz_cookies WHERE name='user_session' AND host LIKE '%github.com'")" \
-  gh image screenshot.png --repo owner/repo
+  GH_IMAGE_EVIDENCE_ROOT=/absolute/evidence \
+  gh image /absolute/evidence/screenshot.png --repo owner/repo
 ```
 
 > [!WARNING]
@@ -153,7 +163,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}              # for gh CLI auth
           GH_SESSION_TOKEN: ${{ secrets.GH_SESSION_TOKEN }}  # for the upload itself
         run: |
-          gh extension install tandemhealth/gh-image --pin v1.2.0-tandem.1
+          gh extension install tandemhealth/gh-image --pin v1.2.0-tandem.2
           gh image check-token                                # optional: fail fast if the session expired
           GH_IMAGE_EVIDENCE_ROOT="$GITHUB_WORKSPACE/test-results" \
             gh image "$GITHUB_WORKSPACE/test-results/screenshot.png" --repo ${{ github.repository }}
@@ -202,4 +212,4 @@ Before opening a PR, run `go test ./...` and `go vet ./...`.
 
 ## License
 
-[MIT](LICENSE) © 2025-2026 drogers0
+[MIT](LICENSE) © 2026 Tandem Health. The original copyright notice is retained in `LICENSE` as required by the MIT license.

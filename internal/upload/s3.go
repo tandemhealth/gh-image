@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/drogers0/gh-image/internal/httputil"
+	"github.com/tandemhealth/gh-image/internal/httputil"
 )
 
 // uploadToS3 uploads the file to S3 using the presigned form fields from the policy.

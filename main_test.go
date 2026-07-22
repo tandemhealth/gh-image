@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/drogers0/gh-image/internal/repo"
-	"github.com/drogers0/gh-image/internal/upload"
+	"github.com/tandemhealth/gh-image/internal/repo"
+	"github.com/tandemhealth/gh-image/internal/upload"
 )
 
 // okDeps returns deps whose boundaries all succeed; tests override individual

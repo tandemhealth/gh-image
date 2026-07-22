@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"regexp"
 
-	"github.com/drogers0/gh-image/internal/httputil"
+	"github.com/tandemhealth/gh-image/internal/httputil"
 )
 
 var uploadTokenRe = regexp.MustCompile(`"uploadToken":"([^"]+)"`)

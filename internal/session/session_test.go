@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/drogers0/gh-image/internal/httputil"
+	"github.com/tandemhealth/gh-image/internal/httputil"
 )
 
 // noRedirectClient returns the httptest server's TLS client with redirect

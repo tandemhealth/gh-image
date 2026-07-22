@@ -33,11 +33,13 @@ Run these checks; only act on the ones that fail.
    ```
    If it fails, tell the user to run `gh auth login` (do not attempt it unattended).
 
-2. **The `gh-image` extension installed** (idempotent — skip if already present)
+2. **The exact Tandem `gh-image` version installed** (idempotent)
 
    ```bash
-   gh extension list | grep -q 'tandemhealth/gh-image' || \
-     gh extension install tandemhealth/gh-image --pin v1.2.0-tandem.1
+   if ! gh extension list | awk '$1 == "gh" && $2 == "image" && $3 == "tandemhealth/gh-image" && $4 == "v1.2.0-tandem.2" { found=1 } END { exit !found }'; then
+     gh extension remove image >/dev/null 2>&1 || true
+     gh extension install tandemhealth/gh-image --pin v1.2.0-tandem.2
+   fi
    ```
 
 3. **A GitHub session for the upload.** `gh-image` does NOT use the `gh` token for

@@ -7,8 +7,8 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/drogers0/gh-image/internal/cookies"
-	"github.com/drogers0/gh-image/internal/httputil"
+	"github.com/tandemhealth/gh-image/internal/cookies"
+	"github.com/tandemhealth/gh-image/internal/httputil"
 )
 
 var userLoginRe = regexp.MustCompile(`<meta name="user-login" content="([^"]+)"`)
