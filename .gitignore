@@ -1,6 +1,7 @@
 # Built binaries
 gh-image
 *.exe
+*.png
 
 # GoReleaser output
 dist/
