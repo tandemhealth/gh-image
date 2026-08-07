@@ -34,8 +34,9 @@ func okDeps() deps {
 				return "![" + input.path + "](url)", nil
 			}
 		},
-		extractToken: func() (string, error) { return "extracted-token", nil },
-		checkToken:   func(tokenFlag string) (string, string, error) { return "octouser", "stub", nil },
+		readToken:  func() (string, error) { return "session-to-store", nil },
+		storeToken: func(string) error { return nil },
+		checkToken: func(tokenFlag string) (string, string, error) { return "octouser", "stub", nil },
 	}
 }
 
@@ -126,25 +127,22 @@ func TestResolveSessionCookie_EnvFallback(t *testing.T) {
 	}
 }
 
-// TestResolveSessionCookie_BrowserFallbackError verifies browser error is wrapped correctly.
-func TestResolveSessionCookie_BrowserFallbackError(t *testing.T) {
-	_, _, err := resolveSessionCookieWithGetter("", "", func() (*http.Cookie, error) {
-		return nil, fmt.Errorf("no browser cookies available")
+// TestResolveSessionCookie_CredentialError verifies credential errors are wrapped.
+func TestResolveSessionCookie_CredentialError(t *testing.T) {
+	_, _, err := resolveSessionCookieWithGetter("", "", func() (string, error) {
+		return "", fmt.Errorf("credential unavailable")
 	})
 	if err == nil {
-		t.Fatal("expected error when browser getter fails, got nil")
+		t.Fatal("expected error when credential getter fails, got nil")
 	}
 	if !strings.Contains(err.Error(), "resolving session cookie") {
 		t.Errorf("expected 'resolving session cookie' in error, got: %v", err)
 	}
 }
 
-func TestResolveSessionCookie_BrowserFallbackSuccess(t *testing.T) {
-	cookie, source, err := resolveSessionCookieWithGetter("", "", func() (*http.Cookie, error) {
-		return &http.Cookie{
-			Name:  "user_session",
-			Value: "browser_token",
-		}, nil
+func TestResolveSessionCookie_CredentialFallbackSuccess(t *testing.T) {
+	cookie, source, err := resolveSessionCookieWithGetter("", "", func() (string, error) {
+		return "stored_token", nil
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -152,11 +150,11 @@ func TestResolveSessionCookie_BrowserFallbackSuccess(t *testing.T) {
 	if cookie == nil {
 		t.Fatal("expected non-nil cookie")
 	}
-	if cookie.Value != "browser_token" {
-		t.Fatalf("expected browser token, got %q", cookie.Value)
+	if cookie.Value != "stored_token" {
+		t.Fatalf("expected stored token, got %q", cookie.Value)
 	}
-	if source != "browser cookies" {
-		t.Errorf("expected source %q, got %q", "browser cookies", source)
+	if source != "gh-image OS credential" {
+		t.Errorf("expected dedicated credential source, got %q", source)
 	}
 }
 
@@ -170,27 +168,6 @@ func TestCookieFromValue_UsableByNewClient(t *testing.T) {
 	client := upload.NewClient(cookie)
 	if client == nil {
 		t.Fatal("expected upload.NewClient to return a non-nil client")
-	}
-}
-
-func TestExtractToken_Success(t *testing.T) {
-	value, err := extractToken(func() (*http.Cookie, error) {
-		return &http.Cookie{Name: "user_session", Value: "browser_abc"}, nil
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if value != "browser_abc" {
-		t.Errorf("expected 'browser_abc', got %q", value)
-	}
-}
-
-func TestExtractToken_Error(t *testing.T) {
-	_, err := extractToken(func() (*http.Cookie, error) {
-		return nil, fmt.Errorf("no cookies")
-	})
-	if err == nil {
-		t.Fatal("expected error, got nil")
 	}
 }
 
@@ -245,10 +222,10 @@ func TestCheckToken_ValidatorError(t *testing.T) {
 }
 
 func TestResolveSessionCookie_WhitespaceEnvVar(t *testing.T) {
-	browserCalled := false
-	_, _, err := resolveSessionCookieWithGetter("", "   ", func() (*http.Cookie, error) {
-		browserCalled = true
-		return &http.Cookie{Name: "user_session", Value: "browser_token"}, nil
+	credentialCalled := false
+	_, _, err := resolveSessionCookieWithGetter("", "   ", func() (string, error) {
+		credentialCalled = true
+		return "stored_token", nil
 	})
 	if err == nil {
 		t.Fatal("expected error for whitespace-only env token, got nil")
@@ -259,8 +236,8 @@ func TestResolveSessionCookie_WhitespaceEnvVar(t *testing.T) {
 	if !strings.Contains(err.Error(), "GH_SESSION_TOKEN") {
 		t.Errorf("expected error to identify source 'GH_SESSION_TOKEN', got: %v", err)
 	}
-	if browserCalled {
-		t.Error("whitespace-only env token should not fall through to browser getter")
+	if credentialCalled {
+		t.Error("whitespace-only env token should not fall through to credential getter")
 	}
 }
 
@@ -293,7 +270,7 @@ func TestRun_VersionAndHelp(t *testing.T) {
 			if code != 0 {
 				t.Fatalf("code = %d, want 0", code)
 			}
-			if !strings.Contains(out, "Usage:") || !strings.Contains(out, "extract-token") {
+			if !strings.Contains(out, "Usage:") || !strings.Contains(out, "auth-store") {
 				t.Errorf("stdout missing usage content: %q", out)
 			}
 		})
@@ -335,20 +312,31 @@ func TestRun_FlagErrors(t *testing.T) {
 }
 
 func TestRun_Subcommands(t *testing.T) {
-	t.Run("extract-token success", func(t *testing.T) {
-		code, out, errOut := runWith(t, []string{"extract-token"}, okDeps())
-		if code != 0 || strings.TrimSpace(out) != "extracted-token" {
-			t.Fatalf("code=%d out=%q", code, out)
+	t.Run("auth-store success", func(t *testing.T) {
+		d := okDeps()
+		var stored string
+		d.storeToken = func(value string) error { stored = value; return nil }
+		code, out, errOut := runWith(t, []string{"auth-store"}, d)
+		if code != 0 || out != "" || stored != "session-to-store" {
+			t.Fatalf("code=%d out=%q stored=%q", code, out, stored)
 		}
-		if !strings.Contains(errOut, "Extracted session token") {
+		if !strings.Contains(errOut, "dedicated gh-image OS credential") {
 			t.Errorf("stderr missing status: %q", errOut)
 		}
 	})
-	t.Run("extract-token error", func(t *testing.T) {
+	t.Run("auth-store requires interactive token reader", func(t *testing.T) {
 		d := okDeps()
-		d.extractToken = func() (string, error) { return "", fmt.Errorf("no browser") }
-		code, _, errOut := runWith(t, []string{"extract-token"}, d)
-		if code != 1 || !strings.Contains(errOut, "no browser") {
+		d.readToken = func() (string, error) { return "", fmt.Errorf("auth-store requires an interactive terminal") }
+		code, _, errOut := runWith(t, []string{"auth-store"}, d)
+		if code != 1 || !strings.Contains(errOut, "interactive terminal") {
+			t.Fatalf("code=%d stderr=%q", code, errOut)
+		}
+	})
+	t.Run("auth-store error", func(t *testing.T) {
+		d := okDeps()
+		d.storeToken = func(string) error { return fmt.Errorf("keyring locked") }
+		code, _, errOut := runWith(t, []string{"auth-store"}, d)
+		if code != 1 || !strings.Contains(errOut, "keyring locked") {
 			t.Fatalf("code=%d stderr=%q", code, errOut)
 		}
 	})
@@ -377,8 +365,8 @@ func TestRun_Subcommands(t *testing.T) {
 			t.Fatalf("code=%d stderr=%q", code, errOut)
 		}
 	})
-	t.Run("extract-token with --token is a conflict error", func(t *testing.T) {
-		code, _, errOut := runWith(t, []string{"extract-token", "--token", "x"}, okDeps())
+	t.Run("auth-store with --token is a conflict error", func(t *testing.T) {
+		code, _, errOut := runWith(t, []string{"auth-store", "--token", "x"}, okDeps())
 		if code != 1 || !strings.Contains(errOut, "--token cannot be combined") {
 			t.Fatalf("code=%d stderr=%q", code, errOut)
 		}
@@ -514,7 +502,7 @@ func TestRun_Upload(t *testing.T) {
 
 func TestRun_UsageErrorDispatchShowsUsage(t *testing.T) {
 	// A usageError from classifySubcommand prints the usage block alongside the error.
-	code, _, errOut := runWith(t, []string{"extract-token", "extra"}, okDeps())
+	code, _, errOut := runWith(t, []string{"auth-store", "extra"}, okDeps())
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
@@ -524,8 +512,7 @@ func TestRun_UsageErrorDispatchShowsUsage(t *testing.T) {
 }
 
 func TestResolveSessionCookie_EnvPath(t *testing.T) {
-	// Exercises the production resolveSessionCookie via the env var, so it never
-	// touches the browser: the env value wins before the browser getter is built.
+	// The environment value wins before the dedicated credential is read.
 	t.Setenv("GH_SESSION_TOKEN", "env-token-value")
 	cookie, source, err := resolveSessionCookie("")
 	if err != nil {
@@ -538,14 +525,14 @@ func TestResolveSessionCookie_EnvPath(t *testing.T) {
 
 func TestResolveSessionCookie_NilGetter(t *testing.T) {
 	_, _, err := resolveSessionCookieWithGetter("", "", nil)
-	if err == nil || !strings.Contains(err.Error(), "browser session getter is unavailable") {
+	if err == nil || !strings.Contains(err.Error(), "credential getter is unavailable") {
 		t.Fatalf("expected nil-getter error, got %v", err)
 	}
 }
 
 func TestProductionDeps_WiringComplete(t *testing.T) {
 	d := productionDeps()
-	if d.resolveRepo == nil || d.resolveCookie == nil || d.openEvidence == nil || d.newUploader == nil || d.extractToken == nil || d.checkToken == nil {
+	if d.resolveRepo == nil || d.resolveCookie == nil || d.openEvidence == nil || d.newUploader == nil || d.readToken == nil || d.storeToken == nil || d.checkToken == nil {
 		t.Fatal("productionDeps left a boundary unwired")
 	}
 }
@@ -562,9 +549,9 @@ func TestClassifySubcommand(t *testing.T) {
 		wantUsageError          bool
 	}{
 		{
-			name:           "extract-token selected",
-			paths:          []string{"extract-token"},
-			wantSubcommand: "extract-token",
+			name:           "auth-store selected",
+			paths:          []string{"auth-store"},
+			wantSubcommand: "auth-store",
 		},
 		{
 			name:           "check-token selected",
@@ -578,14 +565,14 @@ func TestClassifySubcommand(t *testing.T) {
 			wantSubcommand:          "",
 		},
 		{
-			name:                    "double-dash treats extract-token as filename",
-			paths:                   []string{"extract-token"},
+			name:                    "double-dash treats auth-store as filename",
+			paths:                   []string{"auth-store"},
 			firstPosAfterDoubleDash: true,
 			wantSubcommand:          "",
 		},
 		{
-			name:            "extract-token with extra args errors",
-			paths:           []string{"extract-token", "extra"},
+			name:            "auth-store with extra args errors",
+			paths:           []string{"auth-store", "extra"},
 			wantErrContains: "does not take positional arguments",
 			wantUsageError:  true,
 		},
@@ -596,8 +583,8 @@ func TestClassifySubcommand(t *testing.T) {
 			wantUsageError:  true,
 		},
 		{
-			name:            "extract-token with token flag errors",
-			paths:           []string{"extract-token"},
+			name:            "auth-store with token flag errors",
+			paths:           []string{"auth-store"},
 			tokenFlag:       "abc123",
 			wantErrContains: "--token cannot be combined",
 		},
@@ -607,10 +594,10 @@ func TestClassifySubcommand(t *testing.T) {
 			wantSubcommand: "",
 		},
 		{
-			name:            "extract-token with repo flag errors",
-			paths:           []string{"extract-token"},
+			name:            "auth-store with repo flag errors",
+			paths:           []string{"auth-store"},
 			repoSet:         true,
-			wantErrContains: "--repo cannot be combined with extract-token",
+			wantErrContains: "--repo cannot be combined with auth-store",
 		},
 		{
 			name:            "check-token with repo flag errors",

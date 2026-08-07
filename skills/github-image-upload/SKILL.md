@@ -36,20 +36,25 @@ Run these checks; only act on the ones that fail.
 2. **The exact Tandem `gh-image` version installed** (idempotent)
 
    ```bash
-   if ! gh extension list | awk '$1 == "gh" && $2 == "image" && $3 == "tandemhealth/gh-image" && $4 == "v1.2.0-tandem.2" { found=1 } END { exit !found }'; then
+   if ! gh extension list | awk '$1 == "gh" && $2 == "image" && $3 == "tandemhealth/gh-image" && $4 == "v1.3.0-tandem.1" { found=1 } END { exit !found }'; then
      gh extension remove image >/dev/null 2>&1 || true
-     gh extension install tandemhealth/gh-image --pin v1.2.0-tandem.2
+     gh extension install tandemhealth/gh-image --pin v1.3.0-tandem.1
    fi
    ```
 
 3. **A GitHub session for the upload.** `gh-image` does NOT use the `gh` token for
-   the upload (that endpoint rejects tokens); it needs the browser `user_session`
+   the upload (that endpoint rejects tokens); it needs GitHub's `user_session`
    cookie. Resolution order (first match wins):
    - `--token <value>` flag, or
-   - `GH_SESSION_TOKEN` env var (use this in CI / headless), or
-   - the cookie store of a logged-in browser (Chrome/Brave/Chromium/Edge/Firefox/
-     Opera/Safari) — the default for local use. On macOS the first read may show a
-     Keychain prompt; the user should click **Always Allow**.
+   - `GH_SESSION_TOKEN` env var (CI / headless only), or
+   - the dedicated `tandemhealth-gh-image` operating-system credential.
+
+   Run `gh image check-token`. If it reports that no `gh-image` credential exists,
+   stop and tell the user to provision it from a trusted terminal as documented in
+   the extension README. **Do not** inspect browser cookie databases, request
+   Chrome Safe Storage access, run `gh image auth-store`, or ask the user to paste
+   a session token into the agent chat. The installed extension has no browser
+   cookie reader and no command that prints its stored credential.
 
    > ⚠️ A `user_session` cookie grants **full account access** (it is not scoped
    > like a PAT). Treat it like a password; in CI use a dedicated bot account.
@@ -129,9 +134,8 @@ To control display size, embed an HTML tag instead of the bare markdown:
 |---|---|
 | `<org> enforces SAML SSO and your session is not authorized…` | The org requires SSO and your session isn't authorized. Open the `https://github.com/orgs/<org>/sso` URL from the message in a browser, authorize (lasts ~24h), then retry. Write access alone is not enough — this is not a permissions problem. |
 | `uploadToken not found … do you have write access?` | The generic no-token case. Confirm you have write access; if the repo's org uses SSO, authorize at `https://github.com/orgs/<org>/sso` (the message includes this hint) and retry. |
-| No `user_session` cookie found | Log into GitHub in a supported browser, or set `GH_SESSION_TOKEN`. |
-| Windows + Chrome 127+ can't read cookies | Known cookie-library limitation — use another browser or `GH_SESSION_TOKEN`. |
-| CI / headless run | Set `GH_SESSION_TOKEN` (dedicated bot account); the browser cookie path won't exist. |
+| No `gh-image` credential found | The user must provision the dedicated credential from a trusted terminal; do not request or extract the value in the agent session. |
+| CI / headless run | Set `GH_SESSION_TOKEN` from a secret store using a dedicated bot account. |
 | `evidence root is required` | Set `GH_IMAGE_EVIDENCE_ROOT` to the absolute screenshot output directory. |
 | `outside evidence root`, `symlink`, `regular file`, or `invalid PNG` | Regenerate the screenshot directly inside the evidence directory; do not copy through a symlink. |
 | `gh: command not found` | Install the GitHub CLI (`brew install gh`, etc.). |

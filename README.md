@@ -23,7 +23,7 @@ $ GH_IMAGE_EVIDENCE_ROOT=/absolute/evidence \
 New installation:
 
 ```bash
-gh extension install tandemhealth/gh-image --pin v1.2.0-tandem.2
+gh extension install tandemhealth/gh-image --pin v1.3.0-tandem.1
 gh image --version
 ```
 
@@ -31,11 +31,11 @@ Replace an existing installation:
 
 ```bash
 gh extension remove image
-gh extension install tandemhealth/gh-image --pin v1.2.0-tandem.2
+gh extension install tandemhealth/gh-image --pin v1.3.0-tandem.1
 gh image --version
 ```
 
-Expected output: `gh-image v1.2.0-tandem.2`.
+Expected output: `gh-image v1.3.0-tandem.1`.
 
 The Git tree contains no executable binaries, binary assets, or Git LFS objects. Prebuilt executables exist only as the six checksum-published assets on the pinned GitHub Release.
 
@@ -95,7 +95,7 @@ Share this setup block with developers who use Codex or Claude Code:
 
 ```bash
 gh auth status --hostname github.com
-gh extension install tandemhealth/gh-image --pin v1.2.0-tandem.2
+gh extension install tandemhealth/gh-image --pin v1.3.0-tandem.1
 npx --yes skills@1.5.9 add tandemhealth/gh-image --global --skill github-image-upload --agent codex --agent claude-code --yes
 ```
 
@@ -107,26 +107,28 @@ The open [Agent Skills standard](https://agentskills.io/clients) is supported by
 
 ## Authentication
 
-`gh-image` authenticates with your existing GitHub session — **no tokens to provision, no OAuth scopes to configure** for everyday local use. The tool reads the `user_session` cookie from your browser's encrypted cookie store.
-
-**Supported browsers:** Chrome · Brave · Chromium · Edge · Firefox · Opera · Safari
+`gh-image` uses GitHub's `user_session` cookie because GitHub's attachment endpoint rejects OAuth and personal access tokens. It does **not** inspect browser cookie databases or request Chrome Safe Storage or any other browser-owned credential.
 
 **Supported platforms:** macOS · Linux · Windows · Android (Termux)
 
-On macOS, a Keychain prompt may appear on first use to authorize access to your browser's cookie encryption key. Click **Always Allow** to skip future prompts.
+For local agent use, save only the GitHub session in `gh-image`'s dedicated operating-system credential entry. In a trusted terminal—not an agent session—copy the `user_session` value from GitHub's browser DevTools, then run `auth-store` and paste it at the hidden prompt:
 
-> [!NOTE]
-> **When browser cookies aren't available:** Chrome 127+ on Windows is not supported by the current cookie library, and Android (Termux) has no browser cookie store. Supply the token explicitly via `GH_SESSION_TOKEN` (see [Session token override](#session-token-override)); on Windows you can also use another browser.
+```bash
+gh image auth-store
+gh image check-token
+```
 
-### Session token override
+`auth-store` requires a terminal, disables echo while reading, and rejects `--token`; the value does not enter shell history, a process listing, stdout, or agent command output. Later uploads read the dedicated `tandemhealth-gh-image` credential and never access the browser's encryption key. `gh-image` has no command that prints the stored value. The dedicated entry limits what this extension requests from the credential service; it does not turn the GitHub session into a scoped token.
 
-For CI, headless environments, or shared machines, you can supply the session token explicitly. Resolution order (first match wins):
+### Session token sources
+
+Resolution order (first match wins):
 
 | Priority | Source | When to use |
 |---|---|---|
 | 1 | `--token <value>` flag | One-off invocations |
-| 2 | `GH_SESSION_TOKEN` env var | CI/CD, shared machines, non-standard browsers |
-| 3 | Browser cookie store | Local interactive use (default) |
+| 2 | `GH_SESSION_TOKEN` env var | CI/CD with a dedicated bot account |
+| 3 | `tandemhealth-gh-image` OS credential | Local agent use (default) |
 
 ```bash
 # Flag (visible in process listings like `ps aux` — avoid on shared machines)
@@ -137,10 +139,6 @@ GH_IMAGE_EVIDENCE_ROOT=/absolute/evidence \
 GH_SESSION_TOKEN="$MY_TOKEN" GH_IMAGE_EVIDENCE_ROOT=/absolute/evidence \
   gh image /absolute/evidence/screenshot.png --repo owner/repo
 
-# Non-standard browser not auto-detected (Firefox forks like Floorp/LibreWolf)?
-GH_SESSION_TOKEN="$(sqlite3 ~/path/to/profile/cookies.sqlite "SELECT value FROM moz_cookies WHERE name='user_session' AND host LIKE '%github.com'")" \
-  GH_IMAGE_EVIDENCE_ROOT=/absolute/evidence \
-  gh image /absolute/evidence/screenshot.png --repo owner/repo
 ```
 
 > [!WARNING]
@@ -156,7 +154,7 @@ GH_SESSION_TOKEN="$(sqlite3 ~/path/to/profile/cookies.sqlite "SELECT value FROM 
 
 **Setup**
 
-1. Run `gh image extract-token` locally to capture the token (token → stdout, status → stderr), then run `gh image check-token --token <token>` to confirm it authenticates as the intended user (username → stdout on success, exit code `0` = valid).
+1. Copy the `user_session` value from the dedicated bot account's GitHub browser session, then run `gh image check-token --token <token>` to confirm it authenticates as the intended user (username → stdout on success, exit code `0` = valid).
 2. Create a GitHub environment (Settings → Environments → New environment), e.g. `gh-image`, and restrict deployment branches to a trusted set (e.g. `main` only).
 3. Add the token as an **environment secret** named `GH_SESSION_TOKEN` on that environment.
 
@@ -171,7 +169,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}              # for gh CLI auth
           GH_SESSION_TOKEN: ${{ secrets.GH_SESSION_TOKEN }}  # for the upload itself
         run: |
-          gh extension install tandemhealth/gh-image --pin v1.2.0-tandem.2
+          gh extension install tandemhealth/gh-image --pin v1.3.0-tandem.1
           gh image check-token                                # optional: fail fast if the session expired
           GH_IMAGE_EVIDENCE_ROOT="$GITHUB_WORKSPACE/test-results" \
             gh image "$GITHUB_WORKSPACE/test-results/screenshot.png" --repo ${{ github.repository }}
@@ -183,7 +181,7 @@ jobs:
 ## How it works
 
 1. Validates and snapshots one absolute PNG beneath `GH_IMAGE_EVIDENCE_ROOT` or `--evidence-root`.
-2. Resolves a `user_session` cookie from the configured source (flag → env → browser).
+2. Resolves a `user_session` cookie from the configured source (flag → env → dedicated OS credential).
 3. Fetches the target repository's page to obtain an `uploadToken` from the embedded JS payload.
 4. Requests an S3 upload policy from `/upload/policies/assets` using the snapshot's exact size.
 5. Uploads the immutable snapshot directly to S3 using the presigned form fields.
@@ -196,7 +194,7 @@ The Tandem threat model and accepted risks are recorded in **[documentation/secu
 
 ## Requirements
 
-- A supported browser with an active GitHub session — or a `GH_SESSION_TOKEN` for CI.
+- A GitHub `user_session` saved with `gh image auth-store`, or `GH_SESSION_TOKEN` for CI.
 - Write access to the target repository (uploads require it).
 - An absolute evidence directory set with `GH_IMAGE_EVIDENCE_ROOT` or `--evidence-root` and one absolute PNG path beneath it.
 - A target repository — pass `--repo owner/repo`, or run from a git workspace whose `origin` remote is on GitHub.
@@ -212,7 +210,7 @@ The Tandem threat model and accepted risks are recorded in **[documentation/secu
 
 Issues and pull requests are welcome. For bug reports, please include:
 
-- Your OS and browser
+- Your OS
 - The exact `gh image` invocation
 - The error output (with any session token values redacted)
 

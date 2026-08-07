@@ -9,14 +9,16 @@ import (
 	"strings"
 
 	"github.com/tandemhealth/gh-image/internal/cookies"
+	"github.com/tandemhealth/gh-image/internal/credential"
 	"github.com/tandemhealth/gh-image/internal/repo"
 	"github.com/tandemhealth/gh-image/internal/session"
 	"github.com/tandemhealth/gh-image/internal/upload"
+	"golang.org/x/term"
 )
 
 const usage = `Usage:
   gh image [--repo owner/repo] [--token <value>] [--evidence-root <absolute-dir>] <absolute-png-path>
-  gh image extract-token
+  gh image auth-store
   gh image check-token [--token <value>]
   gh image --version`
 
@@ -45,9 +47,10 @@ type deps struct {
 	// newUploader builds an uploader from a session cookie. It is called once per
 	// run so the underlying HTTP client (and its cookie jar) is shared across all
 	// files, matching the single-client behavior of the original implementation.
-	newUploader  func(cookie *http.Cookie) uploadFunc
-	extractToken func() (string, error)
-	checkToken   func(tokenFlag string) (username, source string, err error)
+	newUploader func(cookie *http.Cookie) uploadFunc
+	readToken   func() (string, error)
+	storeToken  func(string) error
+	checkToken  func(tokenFlag string) (username, source string, err error)
 }
 
 func productionDeps() deps {
@@ -69,10 +72,10 @@ func productionDeps() deps {
 				return res.Markdown, nil
 			}
 		},
-		// extract-token stays offline: pass nil so selection skips network validation.
-		extractToken: func() (string, error) {
-			return extractToken(func() (*http.Cookie, error) { return cookies.GetGitHubSession(nil) })
+		readToken: func() (string, error) {
+			return readSessionToken(os.Stdin, os.Stderr)
 		},
+		storeToken: credential.Set,
 		checkToken: func(tokenFlag string) (string, string, error) {
 			return checkToken(tokenFlag, resolveSessionCookie, session.CheckValidity)
 		},
@@ -191,7 +194,7 @@ func run(args []string, stdout, stderr io.Writer, d deps) int {
 			fmt.Fprintln(stdout)
 			fmt.Fprintln(stdout, "Flags:")
 			fmt.Fprintln(stdout, "  --repo owner/repo   GitHub repository (optional)")
-			fmt.Fprintln(stdout, "  --token <value>     GitHub session token (default: extracted from browser)")
+			fmt.Fprintln(stdout, "  --token <value>     GitHub session token (default: dedicated OS credential)")
 			fmt.Fprintln(stdout, "                      Can also be set via GH_SESSION_TOKEN environment variable")
 			fmt.Fprintln(stdout, "                      WARNING: --token values are visible in process listings.")
 			fmt.Fprintln(stdout, "                      Prefer GH_SESSION_TOKEN on shared machines.")
@@ -200,7 +203,7 @@ func run(args []string, stdout, stderr io.Writer, d deps) int {
 			fmt.Fprintln(stdout, "  --version           Print version and exit")
 			fmt.Fprintln(stdout)
 			fmt.Fprintln(stdout, "Subcommands:")
-			fmt.Fprintln(stdout, "  extract-token       Extract session token from browser and print to stdout")
+			fmt.Fprintln(stdout, "  auth-store          Prompt for and store gh-image's dedicated OS credential")
 			fmt.Fprintln(stdout, "  check-token         Verify a session token is valid and print username to stdout")
 			fmt.Fprintln(stdout)
 			fmt.Fprintln(stdout, "The PNG path and evidence root must both be absolute.")
@@ -228,14 +231,17 @@ func run(args []string, stdout, stderr io.Writer, d deps) int {
 		return 1
 	}
 	switch subcommand {
-	case "extract-token":
-		value, err := d.extractToken()
+	case "auth-store":
+		value, err := d.readToken()
 		if err != nil {
+			fmt.Fprintf(stderr, "Error: reading session token: %v\n", err)
+			return 1
+		}
+		if err := d.storeToken(value); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
-		fmt.Fprintln(stderr, "Extracted session token from browser cookies")
-		fmt.Fprintln(stdout, value)
+		fmt.Fprintln(stderr, "Stored GitHub session in the dedicated gh-image OS credential")
 		return 0
 	case "check-token":
 		username, source, err := d.checkToken(tokenFlag)
@@ -302,7 +308,7 @@ func run(args []string, stdout, stderr io.Writer, d deps) int {
 		return 1
 	}
 
-	// Get session cookie (flag > env var > browser)
+	// Get session cookie (flag > env var > dedicated OS credential)
 	cookie, err := d.resolveCookie(tokenFlag)
 	if err != nil {
 		fmt.Fprintf(stderr, "Error: %v\n", err)
@@ -334,20 +340,20 @@ func classifySubcommand(paths []string, firstPosAfterDoubleDash bool, tokenFlag 
 		return "", nil
 	}
 	switch paths[0] {
-	case "extract-token":
+	case "auth-store":
 		if len(paths) > 1 {
-			return "", &usageError{fmt.Errorf("extract-token does not take positional arguments")}
+			return "", &usageError{fmt.Errorf("auth-store does not take positional arguments")}
 		}
 		if tokenFlag != "" {
-			return "", fmt.Errorf("--token cannot be combined with extract-token (extract-token always reads from browser)")
+			return "", fmt.Errorf("--token cannot be combined with auth-store (auth-store reads from the terminal without echo)")
 		}
 		if repoSet {
-			return "", fmt.Errorf("--repo cannot be combined with extract-token")
+			return "", fmt.Errorf("--repo cannot be combined with auth-store")
 		}
 		if evidenceRootSet {
-			return "", fmt.Errorf("--evidence-root cannot be combined with extract-token")
+			return "", fmt.Errorf("--evidence-root cannot be combined with auth-store")
 		}
-		return "extract-token", nil
+		return "auth-store", nil
 	case "check-token":
 		if len(paths) > 1 {
 			return "", &usageError{fmt.Errorf("check-token does not take positional arguments")}
@@ -365,23 +371,17 @@ func classifySubcommand(paths []string, firstPosAfterDoubleDash bool, tokenFlag 
 }
 
 // resolveSessionCookie returns a GitHub session cookie using the first available
-// source: --token flag, GH_SESSION_TOKEN environment variable, or browser extraction.
-// The browser getter validates candidates against GitHub when more than one
-// logged-in session exists, so a stale/logged-out cookie isn't picked over a live one.
+// source: --token flag, GH_SESSION_TOKEN environment variable, or the dedicated
+// gh-image OS credential. It never reads a browser cookie database or browser
+// encryption key.
 func resolveSessionCookie(tokenFlag string) (*http.Cookie, string, error) {
-	get := func() (*http.Cookie, error) {
-		return cookies.GetGitHubSession(func(c *http.Cookie) error {
-			_, err := session.CheckValidity(c)
-			return err
-		})
-	}
-	return resolveSessionCookieWithGetter(tokenFlag, os.Getenv("GH_SESSION_TOKEN"), get)
+	return resolveSessionCookieWithGetter(tokenFlag, os.Getenv("GH_SESSION_TOKEN"), credential.Get)
 }
 
 // resolveSessionCookieWithGetter is a testable variant of resolveSessionCookie
-// that accepts explicit env value and browser cookie getter dependencies.
+// that accepts explicit env value and dedicated credential getter dependencies.
 // Returns the cookie, a human-readable source label, and any error.
-func resolveSessionCookieWithGetter(tokenFlag, envToken string, getBrowserCookie func() (*http.Cookie, error)) (*http.Cookie, string, error) {
+func resolveSessionCookieWithGetter(tokenFlag, envToken string, getCredential func() (string, error)) (*http.Cookie, string, error) {
 	if tokenFlag != "" {
 		cookie, err := cookieFromValue(tokenFlag)
 		if err != nil {
@@ -396,14 +396,39 @@ func resolveSessionCookieWithGetter(tokenFlag, envToken string, getBrowserCookie
 		}
 		return cookie, "GH_SESSION_TOKEN", nil
 	}
-	if getBrowserCookie == nil {
-		return nil, "", fmt.Errorf("no session token found (set --token flag or GH_SESSION_TOKEN env var, or log into GitHub in a supported browser): browser session getter is unavailable")
+	if getCredential == nil {
+		return nil, "", fmt.Errorf("no session token found: gh-image credential getter is unavailable")
 	}
-	cookie, err := getBrowserCookie()
+	value, err := getCredential()
 	if err != nil {
 		return nil, "", fmt.Errorf("resolving session cookie: %w", err)
 	}
-	return cookie, "browser cookies", nil
+	cookie, err := cookieFromValue(value)
+	if err != nil {
+		return nil, "", fmt.Errorf("gh-image OS credential: %w", err)
+	}
+	return cookie, "gh-image OS credential", nil
+}
+
+// readSessionToken reads a secret only from an interactive terminal and disables
+// echo while the user types it. This keeps the value out of shell history,
+// process listings, stdout, and agent command output.
+func readSessionToken(in *os.File, prompt io.Writer) (string, error) {
+	fd := int(in.Fd())
+	if !term.IsTerminal(fd) {
+		return "", fmt.Errorf("auth-store requires an interactive terminal")
+	}
+	fmt.Fprint(prompt, "GitHub user_session: ")
+	value, err := term.ReadPassword(fd)
+	fmt.Fprintln(prompt)
+	if err != nil {
+		return "", err
+	}
+	valueString := strings.TrimSpace(string(value))
+	if _, err := cookieFromValue(valueString); err != nil {
+		return "", err
+	}
+	return valueString, nil
 }
 
 // cookieFromValue constructs a GitHub user_session cookie from a raw token value.
@@ -413,15 +438,6 @@ func cookieFromValue(value string) (*http.Cookie, error) {
 		return nil, fmt.Errorf("session token is empty")
 	}
 	return cookies.NewSessionCookie(value), nil
-}
-
-// extractToken extracts a session token from the browser and returns the raw value.
-func extractToken(getBrowserCookie func() (*http.Cookie, error)) (string, error) {
-	cookie, err := getBrowserCookie()
-	if err != nil {
-		return "", err
-	}
-	return cookie.Value, nil
 }
 
 // checkToken resolves and validates a session token, returning the authenticated username and source.

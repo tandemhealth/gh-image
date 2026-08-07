@@ -14,10 +14,12 @@ gh-image/
 ├── go.sum
 ├── internal/
 │   ├── cookies/
-│   │   ├── cookies.go               # Browser session cookie extraction via kooky
+│   │   ├── cookies.go               # GitHub-scoped session cookie construction
 │   │   ├── cookies_test.go
 │   │   ├── jar.go                   # GitHub cookie jar + same-site pair construction
 │   │   └── jar_test.go
+│   ├── credential/
+│   │   └── credential.go            # Dedicated gh-image OS credential
 │   ├── session/
 │   │   ├── session.go               # Session token validation (check-token)
 │   │   └── session_test.go
@@ -47,13 +49,13 @@ gh-image/
 
 ```
 gh image [--repo owner/repo] [--token <value>] [--evidence-root <absolute-dir>] <absolute-png-path>
-gh image extract-token
+gh image auth-store
 gh image check-token [--token <value>]
 ```
 
 - **Default mode** validates and uploads exactly one absolute PNG path. `GH_IMAGE_EVIDENCE_ROOT` supplies the allowed directory unless `--evidence-root` is present. Flags may appear before or after the positional path.
-- **`extract-token`** reads the session cookie from the browser and prints the raw token value to stdout (status info to stderr). Useful for piping into CI secrets.
-- **`check-token`** resolves a token using the standard precedence (flag → env → browser) and verifies it against GitHub, printing the authenticated username on success.
+- **`auth-store`** reads the session from an interactive terminal with echo disabled and writes it to the dedicated `tandemhealth-gh-image` operating-system credential. It does not accept `--token`, which would expose the value in process listings.
+- **`check-token`** resolves a token using the standard precedence (flag → env → dedicated OS credential) and verifies it against GitHub, printing the authenticated username on success.
 
 ### Session Token Sources
 
@@ -61,33 +63,22 @@ The session token is resolved with the following precedence (first match wins):
 
 1. `--token <value>` flag
 2. `GH_SESSION_TOKEN` environment variable
-3. Browser cookie store (via `kooky`)
+3. Dedicated `tandemhealth-gh-image` operating-system credential
 
-The flag is convenient for one-off use; the env var is the recommended path for CI/CD and shared machines, since `--token` values are visible in process listings. Browser extraction is the zero-config path for local interactive use.
+The flag is convenient for one-off use; the env var is the CI/CD path because `--token` values are visible in process listings. Local agent runs use the dedicated credential. The extension has no browser-cookie reader and no command that prints the stored value.
 
 ## Component Design
 
-### 1. Cookie Extraction (`internal/cookies/cookies.go`)
+### 1. Credential Storage (`internal/credential/credential.go`)
 
-Reads the GitHub `user_session` cookie from local browser cookie stores.
-
-**Dependency:** [`browserutils/kooky`](https://github.com/browserutils/kooky) — a pure Go library that handles:
-- Locating each browser's cookie store on disk
-- Retrieving encryption keys (macOS Keychain, Windows DPAPI, Linux GNOME Keyring / kwallet)
-- AES decryption and cookie DB schema differences across versions
-- Per-browser quirks for Chromium-family browsers, Firefox, Safari, and Opera
-
-**Supported browsers** (registered via blank-imported kooky finders): Chrome, Brave, Edge, Chromium, Firefox, Opera, Safari. `GetGitHubSession` queries all of them in one pass, groups the `user_session` candidates per browser store, and prefers stores that are logged in. When more than one candidate survives, `validate` is used to pick a live one (pass nil to skip network validation).
+Reads and writes one credential under service `tandemhealth-gh-image` and account `github.com-user_session` through the operating system's credential service. `auth-store` is the only write path. Upload and `check-token` can read the entry but never print its value.
 
 ```go
-// GetGitHubSession returns the best user_session cookie for github.com across
-// all registered browsers. It groups candidates per browser store, prefers
-// stores that are logged in, and when more than one survives uses validate to
-// pick a live one (pass nil to skip network validation).
-func GetGitHubSession(validate func(*http.Cookie) error) (*http.Cookie, error)
+func Get() (string, error)
+func Set(value string) error
 ```
 
-The only cookie that needs to be read from the browser is `user_session`. The `__Host-user_session_same_site` cookie is a strict-SameSite duplicate with the same value, so it is synthesized rather than read separately (see Cookie Jar below). The `_gh_sess` cookie rotates with each GitHub response and is managed automatically by the HTTP client's cookie jar.
+The only stored value is `user_session`. The `__Host-user_session_same_site` cookie is a strict-SameSite duplicate with the same value, so it is synthesized rather than stored separately (see Cookie Jar below). The `_gh_sess` cookie rotates with each GitHub response and is managed automatically by the HTTP client's cookie jar.
 
 ### 2. Cookie Jar (`internal/cookies/jar.go`)
 
@@ -208,15 +199,15 @@ Handles the multipart form construction for the S3 presigned upload. Separated f
 `main()` is a one-line entrypoint that delegates to a testable
 `run(args []string, stdout, stderr io.Writer, deps) int`: it returns an exit code
 instead of calling `os.Exit`, writes to injected streams, and takes its I/O
-boundaries (repo resolution, cookie resolution, upload, extract-token, check-token)
+boundaries (repo resolution, cookie resolution, credential storage, upload, check-token)
 as a `deps` struct, so the full CLI spine is exercised in tests without network,
 subprocess, or process exit.
 
 Responsibilities:
 
 - **Manual arg parsing** so that flags can appear before or after positional args, with `--` as an explicit terminator for filenames starting with a dash.
-- **Subcommand dispatch** for `extract-token` and `check-token`, with validation that disallowed flag combinations are rejected before any work is done.
-- **Session resolution** via `resolveSessionCookie`, which applies the flag → env → browser precedence and wraps raw token values into a properly scoped `*http.Cookie`.
+- **Subcommand dispatch** for `auth-store` and `check-token`, with validation that disallowed flag combinations are rejected before any work is done.
+- **Session resolution** via `resolveSessionCookie`, which applies the flag → env → dedicated credential precedence and wraps raw token values into a properly scoped `*http.Cookie`.
 - **Fail-closed evidence validation** before repository resolution or session-cookie access.
 - **Single upload**: batches are rejected; one validation or upload failure exits non-zero.
 
@@ -226,7 +217,7 @@ Responsibilities:
 flowchart TD
     Start(["<b>User:</b> gh image /evidence/screenshot.png --repo o/r"])
     Validate["<b>Validate and snapshot</b><br/>absolute PNG under evidence root<br/><i>≤ 10,000,000 bytes</i>"]
-    Session["<b>Resolve Session</b><br/>flag → env → browser<br/><i>(kooky for browser)</i>"]
+    Session["<b>Resolve Session</b><br/>flag → env → gh-image credential"]
 
     Start --> Validate --> Session
 
@@ -258,7 +249,7 @@ flowchart TD
 
 | Action | Auth Method | Source |
 |---|---|---|
-| Steps 0, 1, 3 (GitHub requests) | `user_session` + `__Host-user_session_same_site` cookies | `--token` flag, `GH_SESSION_TOKEN`, or browser cookie DB (via kooky) |
+| Steps 0, 1, 3 (GitHub requests) | `user_session` + `__Host-user_session_same_site` cookies | `--token` flag, `GH_SESSION_TOKEN`, or dedicated OS credential |
 | Step 2 (S3 upload) | None | Presigned policy from step 1 |
 | Repo ID lookup | OAuth token | `gh` CLI (via `gh auth`) |
 | `check-token` validation | Same `user_session` pair | Same precedence as upload |
@@ -289,7 +280,7 @@ git push --tags
 
 | Dependency | Purpose |
 |---|---|
-| [`browserutils/kooky`](https://github.com/browserutils/kooky) | Cross-browser cookie extraction (Keychain / DPAPI / Keyring + AES + SQLite/ESE) |
+| [`zalando/go-keyring`](https://github.com/zalando/go-keyring) | Dedicated OS credential storage |
 | Go standard library `net/http` | HTTP client + cookie jar for the upload flow |
 | Go standard library `mime/multipart` | Multipart form construction |
 | Go standard library `encoding/json` | JSON parsing |
@@ -297,11 +288,14 @@ git push --tags
 
 ## Platform Notes
 
-- **macOS:** Fully supported. On first browser-cookie use, a Keychain prompt may appear to authorize access to the browser's cookie encryption key. Click "Always Allow" to avoid repeated prompts. Safari is supported in addition to Chromium-family browsers.
-- **Linux:** Supported via kooky (GNOME Keyring / kwallet for Chromium-family key storage; Firefox profile DBs read directly). The upload flow is platform-agnostic.
-- **Windows:** Supported via kooky (DPAPI for Chromium-family cookie decryption). Binaries are built for Windows amd64.
-- **CI / headless environments:** Use `GH_SESSION_TOKEN` (preferred) or `--token` to skip browser extraction entirely.
+- **macOS:** The dedicated entry uses Login Keychain. The program never requests Chrome Safe Storage.
+- **Linux:** The dedicated entry uses Secret Service (for example GNOME Keyring).
+- **Windows:** The dedicated entry uses Windows Credential Manager. Binaries are built for Windows amd64.
+- **Android (Termux):** The OS credential backend is unavailable; use `GH_SESSION_TOKEN` from a dedicated account.
+- **CI / headless environments:** Use `GH_SESSION_TOKEN` from a dedicated bot account.
 
 ## Security Boundary
 
 The configured evidence root prevents accidental uploads outside the screenshot directory. It is not a security boundary against a process that can replace `GH_IMAGE_EVIDENCE_ROOT`, change command-line arguments, or create hard links. The immutable snapshot prevents later path replacement or same-inode writes from changing the bytes covered by GitHub's upload policy.
+
+The dedicated credential prevents `gh-image` from requesting a browser-wide encryption key. It does not reduce the authority of `user_session`, and the operating system's credential service—not this program—decides which same-user processes may request the stored entry.
