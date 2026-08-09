@@ -327,7 +327,7 @@ func (c *Client) Upload(owner, repo, digest string, size int64, contents io.Read
 		return UploadResult{URL: asset.BrowserDownloadURL}, nil
 	}
 	uploadURL := fmt.Sprintf("https://uploads.github.com/repos/%s/%s/releases/%d/assets?name=%s", owner, repo, release.ID, name)
-	out, uploadErr := c.run.Run(contents, "--method", "POST", "-H", "Content-Type: image/png", "--input", "-", uploadURL)
+	out, uploadErr := c.run.Run(contents, "--method", "POST", "-H", "Content-Type: image/png", "-H", "Content-Length: "+strconv.FormatInt(size, 10), "--input", "-", uploadURL)
 	if uploadErr == nil {
 		if err := json.Unmarshal(out, &asset); err != nil {
 			return UploadResult{}, fmt.Errorf("decoding uploaded asset: %w", err)

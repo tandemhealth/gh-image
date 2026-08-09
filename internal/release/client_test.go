@@ -110,7 +110,7 @@ func TestUploadWaitsForConcurrentAssetAfterDuplicate(t *testing.T) {
 		{wantArgs: "repos/acme/widgets", stdout: `{"default_branch":"main","permissions":{"push":true}}`},
 		{wantArgs: "repos/acme/widgets/releases/tags/gh-image-evidence", stdout: `{"id":7,"tag_name":"gh-image-evidence","name":"Automated screenshot evidence","draft":false,"prerelease":true}`},
 		{wantArgs: "--paginate --slurp repos/acme/widgets/releases/7/assets?per_page=100", stdout: `[]`},
-		{wantArgs: "--method POST -H Content-Type: image/png --input - https://uploads.github.com/repos/acme/widgets/releases/7/assets?name=" + name, wantBody: "png", err: &APIError{Status: 422, ExitCode: 1, Message: "already exists"}},
+		{wantArgs: "--method POST -H Content-Type: image/png -H Content-Length: 3 --input - https://uploads.github.com/repos/acme/widgets/releases/7/assets?name=" + name, wantBody: "png", err: &APIError{Status: 422, ExitCode: 1, Message: "already exists"}},
 		{wantArgs: "--paginate --slurp repos/acme/widgets/releases/7/assets?per_page=100", stdout: fmt.Sprintf(`[[{"name":%q,"state":"starter","size":0}]]`, name)},
 		{wantArgs: "--paginate --slurp repos/acme/widgets/releases/7/assets?per_page=100", stdout: fmt.Sprintf(`[[{"name":%q,"state":"uploaded","size":3,"browser_download_url":%q}]]`, name, url)},
 	}}
@@ -133,7 +133,7 @@ func TestUploadCreatesContentAddressedAsset(t *testing.T) {
 		{wantArgs: "repos/acme/widgets", stdout: `{"default_branch":"main","permissions":{"push":true}}`},
 		{wantArgs: "repos/acme/widgets/releases/tags/gh-image-evidence", stdout: `{"id":7,"tag_name":"gh-image-evidence","name":"Automated screenshot evidence","draft":false,"prerelease":true}`},
 		{wantArgs: "--paginate --slurp repos/acme/widgets/releases/7/assets?per_page=100", stdout: `[]`},
-		{wantArgs: "--method POST -H Content-Type: image/png --input - https://uploads.github.com/repos/acme/widgets/releases/7/assets?name=" + name, wantBody: "png", stdout: fmt.Sprintf(`{"name":%q,"state":"uploaded","size":3,"browser_download_url":%q}`, name, url)},
+		{wantArgs: "--method POST -H Content-Type: image/png -H Content-Length: 3 --input - https://uploads.github.com/repos/acme/widgets/releases/7/assets?name=" + name, wantBody: "png", stdout: fmt.Sprintf(`{"name":%q,"state":"uploaded","size":3,"browser_download_url":%q}`, name, url)},
 	}}
 	result, err := NewClient(run).Upload("acme", "widgets", digest, 3, bytes.NewBufferString("png"))
 	if err != nil {
