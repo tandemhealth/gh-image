@@ -8,6 +8,7 @@ import (
 	"io"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -21,6 +22,7 @@ const (
 var (
 	digestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	slugPattern   = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+	httpStatus    = regexp.MustCompile(`\(HTTP ([0-9]{3})\)`)
 )
 
 type Runner interface {
@@ -28,6 +30,14 @@ type Runner interface {
 }
 
 type execRunner struct{}
+
+type APIError struct {
+	Status   int
+	ExitCode int
+	Message  string
+}
+
+func (e *APIError) Error() string { return e.Message }
 
 func (execRunner) Run(stdin io.Reader, args ...string) ([]byte, error) {
 	cmd := exec.Command("gh", append([]string{"api"}, args...)...)
@@ -40,7 +50,15 @@ func (execRunner) Run(stdin io.Reader, args ...string) ([]byte, error) {
 		if message == "" {
 			message = err.Error()
 		}
-		return nil, errors.New(message)
+		apiErr := &APIError{Message: message}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			apiErr.ExitCode = exitErr.ExitCode()
+		}
+		if match := httpStatus.FindStringSubmatch(message); len(match) == 2 {
+			apiErr.Status, _ = strconv.Atoi(match[1])
+		}
+		return nil, apiErr
 	}
 	return out, nil
 }
@@ -55,7 +73,12 @@ func NewClient(run Runner) *Client {
 	if run == nil {
 		run = execRunner{}
 	}
-	return &Client{run: run, sleep: time.Sleep, attempts: 5}
+	return &Client{run: run, sleep: time.Sleep, attempts: 6}
+}
+
+func statusIs(err error, status int) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Status == status
 }
 
 type Repository struct {
@@ -164,7 +187,7 @@ func (c *Client) Init(owner, repo string) (InitResult, error) {
 	if err == nil {
 		return InitResult{Release: existing}, nil
 	}
-	if !strings.Contains(strings.ToLower(err.Error()), "404") && !strings.Contains(strings.ToLower(err.Error()), "not found") {
+	if !statusIs(err, 404) {
 		return InitResult{}, fmt.Errorf("checking evidence release: %w", err)
 	}
 	payload := map[string]any{
@@ -183,7 +206,7 @@ func (c *Client) Init(owner, repo string) (InitResult, error) {
 	encoded = append(encoded, '\n')
 	out, err := c.run.Run(bytes.NewReader(encoded), "--method", "POST", fmt.Sprintf("repos/%s/%s/releases", owner, repo), "--input", "-")
 	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "422") {
+		if statusIs(err, 422) {
 			existing, readErr := c.release(owner, repo)
 			if readErr == nil {
 				return InitResult{Release: existing}, nil
@@ -243,6 +266,7 @@ func matchingAsset(assets []Asset, owner, repo, name string, size int64) (Asset,
 }
 
 func (c *Client) waitForAsset(owner, repo, name string, size int64, releaseID int64) (Asset, error) {
+	var last Asset
 	for attempt := 0; attempt < c.attempts; attempt++ {
 		assets, err := c.assets(owner, repo, releaseID)
 		if err != nil {
@@ -255,9 +279,19 @@ func (c *Client) waitForAsset(owner, repo, name string, size int64, releaseID in
 		if complete {
 			return asset, nil
 		}
-		if attempt+1 < c.attempts {
-			c.sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
+		if asset.Name == name {
+			last = asset
 		}
+		if attempt+1 < c.attempts {
+			delay := time.Second << attempt
+			if delay > 8*time.Second {
+				delay = 8 * time.Second
+			}
+			c.sleep(delay)
+		}
+	}
+	if last.Name == name {
+		return Asset{}, fmt.Errorf("existing asset %s remained in state %q with size %d; refusing to delete or replace it", name, last.State, last.Size)
 	}
 	return Asset{}, fmt.Errorf("asset %s did not reach uploaded state with size %d", name, size)
 }
@@ -308,7 +342,7 @@ func (c *Client) Upload(owner, repo, digest string, size int64, contents io.Read
 			}
 		}
 	}
-	if uploadErr != nil && !strings.Contains(strings.ToLower(uploadErr.Error()), "422") && !strings.Contains(strings.ToLower(uploadErr.Error()), "already_exists") {
+	if uploadErr != nil && !statusIs(uploadErr, 422) {
 		return UploadResult{}, fmt.Errorf("uploading evidence asset: %w", uploadErr)
 	}
 	asset, err = c.waitForAsset(owner, repo, name, size, release.ID)

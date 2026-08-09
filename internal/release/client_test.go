@@ -2,7 +2,6 @@ package release
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -72,7 +71,7 @@ func TestCheckAccessRejectsReadOnlyRepository(t *testing.T) {
 func TestInitCreatesOneNonLatestPrerelease(t *testing.T) {
 	run := &scriptedRunner{t: t, calls: []scriptedCall{
 		{wantArgs: "repos/acme/widgets", stdout: `{"default_branch":"trunk","permissions":{"push":true}}`},
-		{wantArgs: "repos/acme/widgets/releases/tags/gh-image-evidence", err: errors.New("HTTP 404")},
+		{wantArgs: "repos/acme/widgets/releases/tags/gh-image-evidence", err: &APIError{Status: 404, ExitCode: 1, Message: "not found"}},
 		{wantArgs: "--method POST repos/acme/widgets/releases --input -", wantBody: `{"body":"Stable storage for screenshots uploaded by the gh-image extension.","draft":false,"make_latest":"false","name":"Automated screenshot evidence","prerelease":true,"tag_name":"gh-image-evidence","target_commitish":"trunk"}` + "\n", stdout: `{"id":8,"tag_name":"gh-image-evidence","name":"Automated screenshot evidence","draft":false,"prerelease":true,"html_url":"https://github.com/acme/widgets/releases/tag/gh-image-evidence"}`},
 	}}
 	result, err := NewClient(run).Init("acme", "widgets")
@@ -111,7 +110,7 @@ func TestUploadWaitsForConcurrentAssetAfterDuplicate(t *testing.T) {
 		{wantArgs: "repos/acme/widgets", stdout: `{"default_branch":"main","permissions":{"push":true}}`},
 		{wantArgs: "repos/acme/widgets/releases/tags/gh-image-evidence", stdout: `{"id":7,"tag_name":"gh-image-evidence","name":"Automated screenshot evidence","draft":false,"prerelease":true}`},
 		{wantArgs: "--paginate --slurp repos/acme/widgets/releases/7/assets?per_page=100", stdout: `[]`},
-		{wantArgs: "--method POST -H Content-Type: image/png --input - https://uploads.github.com/repos/acme/widgets/releases/7/assets?name=" + name, wantBody: "png", err: errors.New("HTTP 422 already_exists")},
+		{wantArgs: "--method POST -H Content-Type: image/png --input - https://uploads.github.com/repos/acme/widgets/releases/7/assets?name=" + name, wantBody: "png", err: &APIError{Status: 422, ExitCode: 1, Message: "already exists"}},
 		{wantArgs: "--paginate --slurp repos/acme/widgets/releases/7/assets?per_page=100", stdout: fmt.Sprintf(`[[{"name":%q,"state":"starter","size":0}]]`, name)},
 		{wantArgs: "--paginate --slurp repos/acme/widgets/releases/7/assets?per_page=100", stdout: fmt.Sprintf(`[[{"name":%q,"state":"uploaded","size":3,"browser_download_url":%q}]]`, name, url)},
 	}}
@@ -162,7 +161,7 @@ func TestUploadStopsWhenPendingAssetNeverCompletes(t *testing.T) {
 	c.attempts = 3
 	c.sleep = func(time.Duration) {}
 	_, err := c.Upload("acme", "widgets", digest, 3, bytes.NewBufferString("png"))
-	if err == nil || !strings.Contains(err.Error(), "did not reach uploaded state") {
+	if err == nil || !strings.Contains(err.Error(), "remained in state") || !strings.Contains(err.Error(), "refusing to delete or replace") {
 		t.Fatalf("error = %v", err)
 	}
 }

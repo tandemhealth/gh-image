@@ -2,6 +2,8 @@
 
 `gh-image` uses `gh api`, so GitHub authentication stays inside the installed GitHub CLI. The extension does not accept, print, read, or store a browser session, personal access token, OAuth token, or browser encryption key.
 
+Versions before `v1.4.0-tandem.1` could store a GitHub browser session in an operating-system credential named `tandemhealth-gh-image`. Current versions never read that entry, so it has no effect on uploads. Existing installations can remove the obsolete entry under the operating system's normal credential-management policy; this cleanup is optional and is not part of setup or upgrade.
+
 Every request names one target repository. The authenticated account must have push access. `gh image init` creates only the `gh-image-evidence` prerelease and tag. Uploads use content-addressed names and never delete or replace assets.
 
 Input policy is enforced before a GitHub request. The command accepts one absolute PNG below a configured absolute evidence root, rejects symlinks and non-regular files, validates the PNG structure and decode limits, and uploads an immutable canonical snapshot.
