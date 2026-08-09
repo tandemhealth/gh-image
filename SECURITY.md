@@ -1,34 +1,11 @@
-# Security Policy
+# Security policy
 
-## What this tool handles
+`gh-image` uses `gh api`, so GitHub authentication stays inside the installed GitHub CLI. The extension does not accept, print, read, or store a browser session, personal access token, OAuth token, or browser encryption key.
 
-`gh-image` reads one GitHub `user_session` cookie from its dedicated operating-system credential entry or from an explicit token source. It does not inspect browser cookie stores or request browser encryption keys.
+Every request names one target repository. The authenticated account must have push access. `gh image init` creates only the `gh-image-evidence` prerelease and tag. Uploads use content-addressed names and never delete or replace assets.
 
-The cookie grants **full account access** — equivalent to your GitHub password, and not scoped like a personal access token. See the [Authentication](README.md#authentication) section of the README for full details on how the cookie is sourced and used.
+Input policy is enforced before a GitHub request. The command accepts one absolute PNG below a configured absolute evidence root, rejects symlinks and non-regular files, validates the PNG structure and decode limits, and uploads an immutable canonical snapshot.
 
-## Reporting a vulnerability
+Report vulnerabilities through [GitHub private vulnerability reporting](https://github.com/tandemhealth/gh-image/security/advisories/new). Include the affected version, impact, reproduction steps, and any proof of concept.
 
-If you've found a security issue in `gh-image`, please report it **privately** rather than opening a public issue.
-
-Use GitHub's [private vulnerability reporting](https://github.com/tandemhealth/gh-image/security/advisories/new) to submit the report.
-
-Please include:
-
-- A description of the vulnerability and its potential impact
-- Steps to reproduce
-- Affected version(s)
-- Any proof-of-concept code, if applicable
-
-
-## If your session token has been leaked
-
-See the warning callout in the README's [Session token override](README.md#session-token-override) section for the recommended remediation flow (sign out → revoke session → change password).
-
-## Supported versions
-
-Security fixes are applied to the latest release only.
-
-| Version | Supported |
-|---|---|
-| Latest release | ✅ |
-| Older releases | ❌ — please upgrade |
+Security fixes apply to the latest release only.

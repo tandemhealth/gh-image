@@ -1,4 +1,6 @@
-# GitHub Internal Image Upload Flow
+# Removed browser-session upload flow (historical)
+
+This document records the protocol used before `v1.4.0-tandem.1`. Current builds use the documented GitHub Releases REST API through `gh api`; none of the cookie, browser-session, S3-policy, or finalize steps below exist in current code. Do not use this document as setup instructions.
 
 ## Overview
 

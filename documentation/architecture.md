@@ -1,301 +1,53 @@
 # Architecture
 
-## Overview
+`gh-image` has three commands:
 
-`gh-image` is a Go CLI tool distributed as a `gh` extension. The Tandem build uploads exactly one PNG screenshot through the internal API used by GitHub's drag-and-drop UI. Before it reads GitHub credentials, it verifies the absolute path is beneath a configured evidence directory, rejects symlinks and non-regular files, validates the PNG, enforces a 10,000,000-byte limit, and snapshots the bytes. It then negotiates an upload policy, sends that snapshot to S3, finalizes the image, and prints one markdown embed.
-
-## Project Structure
-
-```
-gh-image/
-├── main.go                          # CLI entrypoint, arg parsing, subcommand dispatch
-├── main_test.go
-├── go.mod
-├── go.sum
-├── internal/
-│   ├── cookies/
-│   │   ├── cookies.go               # GitHub-scoped session cookie construction
-│   │   ├── cookies_test.go
-│   │   ├── jar.go                   # GitHub cookie jar + same-site pair construction
-│   │   └── jar_test.go
-│   ├── credential/
-│   │   └── credential.go            # Dedicated gh-image OS credential
-│   ├── session/
-│   │   ├── session.go               # Session token validation (check-token)
-│   │   └── session_test.go
-│   ├── httputil/
-│   │   └── httputil.go              # Shared User-Agent constant
-│   ├── upload/
-│   │   ├── evidence.go              # Path lockdown, PNG validation, immutable snapshot
-│   │   ├── evidence_test.go
-│   │   ├── upload.go                # Orchestrates the 3-step upload flow + HTTP client
-│   │   ├── upload_test.go
-│   │   ├── token.go                 # Fetches uploadToken from repo page
-│   │   ├── token_test.go
-│   │   └── s3.go                    # S3 presigned multipart upload
-│   └── repo/
-│       ├── repo.go                  # Infers owner/repo from git remote, resolves repo ID
-│       └── repo_test.go
-├── documentation/
-│   ├── architecture.md              # This file
-│   ├── github-image-upload-flow.md  # Reverse-engineered upload protocol
-│   └── security-validation-2026-07-22.md
-└── .github/
-    └── workflows/
-        └── release.yml              # GoReleaser cross-compilation + release
+```text
+gh image [--repo owner/repo] [--evidence-root absolute-dir] absolute-png
+gh image init [--repo owner/repo]
+gh image check-access [--repo owner/repo]
 ```
 
-## CLI Surface
+## Authentication boundary
 
-```
-gh image [--repo owner/repo] [--token <value>] [--evidence-root <absolute-dir>] <absolute-png-path>
-gh image auth-store
-gh image check-token [--token <value>]
-```
+All GitHub requests run as `gh api` subprocesses. The GitHub CLI supplies its existing login. `gh-image` never asks `gh` to print its token and has no credential input, environment variable, keyring, cookie jar, or browser integration.
 
-- **Default mode** validates and uploads exactly one absolute PNG path. `GH_IMAGE_EVIDENCE_ROOT` supplies the allowed directory unless `--evidence-root` is present. Flags may appear before or after the positional path.
-- **`auth-store`** reads the session from an interactive terminal with echo disabled and writes it to the dedicated `tandemhealth-gh-image` operating-system credential. It does not accept `--token`, which would expose the value in process listings.
-- **`check-token`** resolves a token using the standard precedence (flag → env → dedicated OS credential) and verifies it against GitHub, printing the authenticated username on success.
+An explicit `--repo` requires no subprocess before GitHub access. Without it, `internal/repo` reads only `git remote get-url origin` and extracts the GitHub owner and repository.
 
-### Session Token Sources
+## Managed release
 
-The session token is resolved with the following precedence (first match wins):
+Each target repository has one published prerelease:
 
-1. `--token <value>` flag
-2. `GH_SESSION_TOKEN` environment variable
-3. Dedicated `tandemhealth-gh-image` operating-system credential
-
-The flag is convenient for one-off use; the env var is the CI/CD path because `--token` values are visible in process listings. Local agent runs use the dedicated credential. The extension has no browser-cookie reader and no command that prints the stored value.
-
-## Component Design
-
-### 1. Credential Storage (`internal/credential/credential.go`)
-
-Reads and writes one credential under service `tandemhealth-gh-image` and account `github.com-user_session` through the operating system's credential service. `auth-store` is the only write path. Upload and `check-token` can read the entry but never print its value.
-
-```go
-func Get() (string, error)
-func Set(value string) error
-```
-
-The only stored value is `user_session`. The `__Host-user_session_same_site` cookie is a strict-SameSite duplicate with the same value, so it is synthesized rather than stored separately (see Cookie Jar below). The `_gh_sess` cookie rotates with each GitHub response and is managed automatically by the HTTP client's cookie jar.
-
-### 2. Cookie Jar (`internal/cookies/jar.go`)
-
-Constructs an `http.CookieJar` pre-loaded with the `user_session` cookie and its synthesized `__Host-user_session_same_site` counterpart, both scoped to `https://github.com`. GitHub's CSRF validation requires both cookies on the upload endpoints.
-
-```go
-// SessionCookiePair returns the user_session cookie and its
-// __Host-user_session_same_site counterpart synthesized from it.
-func SessionCookiePair(sessionCookie *http.Cookie) [2]*http.Cookie
-
-// NewGitHubCookieJar creates a cookie jar pre-loaded with the session pair
-// for https://github.com.
-func NewGitHubCookieJar(sessionCookie *http.Cookie) http.CookieJar
-```
-
-### 3. Session Validation (`internal/session/`)
-
-Verifies a session cookie is valid by fetching `https://github.com/settings/profile` and inspecting the response. A 200 confirms validity; a redirect to login means the token is expired or invalid. When the response body contains a `<meta name="user-login" ...>` tag, the username is extracted and returned.
-
-```go
-// CheckValidity verifies a GitHub session cookie is valid and returns
-// the authenticated username on success.
-func CheckValidity(sessionCookie *http.Cookie) (string, error)
-```
-
-This package is what powers the `check-token` subcommand. It uses `cookies.SessionCookiePair` and `httputil.UserAgent` so its requests look identical to the upload flow's.
-
-### 4. HTTP Utilities (`internal/httputil/`)
-
-Holds shared HTTP plumbing that needs to be consistent across packages. Currently a single `UserAgent` constant — a recent Chrome desktop UA string — used by both the upload flow and the session validator so all GitHub requests present a uniform identity.
-
-### 5. Repository Resolution (`internal/repo/`)
-
-Resolves the target GitHub repository's owner, name, and numeric ID.
-
-If `--repo` is not provided, the tool infers `owner/repo` from the current git workspace by parsing the `origin` remote URL (`git remote get-url origin`). This supports both SSH (`git@github.com:owner/repo.git`) and HTTPS (`https://github.com/owner/repo.git`) remote formats via regex.
-
-The numeric repository ID is resolved via the GitHub REST API (`gh api repos/{owner}/{repo} --jq .id`).
-
-The `git`/`gh` calls go through an injectable command `runner` (the exported
-`Resolve` wraps the production `execRun`), so remote-URL and ID parsing are
-unit-testable without a real git repo or authenticated `gh`.
-
-```go
-// Resolve returns full repo info. If owner/name are empty, it infers from the
-// git remote. Internally it delegates to unexported workers (fromRemote,
-// lookupID, resolve) that take an injectable command runner.
-func Resolve(owner, name string) (*Info, error)
-```
-
-### 6. Evidence Validation and Upload (`internal/upload/`)
-
-`OpenEvidence` runs before repository lookup, cookie access, or network I/O. It requires absolute root and input paths, uses `filepath.Rel` for containment, rejects symlinks with `os.Root.Lstat`, opens the file through `os.Root`, verifies the opened inode with `os.SameFile`, reads at most 10,000,001 bytes, and validates both the PNG signature and PNG header structure. The returned `Evidence` holds an immutable byte snapshot, basename, and exact size.
-
-The remaining code implements the 3-step upload protocol documented in [github-image-upload-flow.md](github-image-upload-flow.md). All GitHub-bound requests use a shared `http.Client` whose cookie jar is built by `cookies.NewGitHubCookieJar`, so `_gh_sess` rotation is handled automatically.
-
-All GitHub requests are issued through a `*Client` that carries the cookie-jar
-HTTP client plus a `baseURL` (production `https://github.com`); tests point
-`baseURL` at an `httptest` server to exercise the real request/parse code.
-
-```go
-// NewClient creates a Client with the GitHub session cookies set and the
-// production base URL.
-func NewClient(sessionCookie *http.Cookie) *Client
-
-// Upload uploads validated evidence to GitHub and returns the asset URL,
-// sanitized filename, and a ready-to-paste markdown reference.
-func (c *Client) Upload(owner, repo string, repoID int, evidence *Evidence) (*Result, error)
-```
-
-#### Token Retrieval (`token.go`)
-
-Fetches the repository page and extracts the `uploadToken` from the embedded JavaScript payload. This token is specific to the upload endpoint — standard form CSRF tokens do not work.
-
-```go
-// getUploadToken fetches the repo page and extracts the uploadToken
-// from the JS payload. Requires authenticated cookies in the client.
-func (c *Client) getUploadToken(owner, repo string) (string, error)
-```
-
-#### Upload Orchestration (`upload.go`)
-
-Coordinates the full flow for one validated PNG snapshot:
-
-```
-Get upload token
-        │
-        ▼
-requestPolicy()        ──→  POST /upload/policies/assets
-        │                    Returns: S3 form fields, asset ID,
-        │                    asset_upload_authenticity_token
-        ▼
-uploadToS3()           ──→  POST {s3_upload_url}
-        │                    Multipart form with presigned fields + file
-        │                    No GitHub auth needed
-        ▼
-finalizeUpload()       ──→  PUT {asset_upload_url}
-        │                    Path from policy: /upload/assets/{id} (images)
-		│                    /upload/assets/{id}
-        │                    Uses asset_upload_authenticity_token from step 1
-        ▼
-    Returns asset href URL
-```
-
-**Key implementation details:**
-- The `form` fields from the policy response must be sent to S3 exactly as-is. Adding extra fields (e.g., duplicate `Content-Type`) causes S3 to reject the upload with a 403 policy violation.
-- Fields are written in a deterministic order (see `s3FieldOrder` in `s3.go`). Go map iteration is nondeterministic, and we observed empirically that S3 presigned POSTs can be sensitive to field order; the known keys are emitted first, then any unrecognized keys, so future additions still flow through.
-- The `file` field must be the **last** field in the multipart form.
-- The finalize step uses `asset_upload_authenticity_token` from the policy response, **not** the `uploadToken` from step 0. Each step produces the token needed for the next step (see [Token Relationships](github-image-upload-flow.md#token-relationships)).
-- The finalize step is mandatory — without it, the asset URL returns 404.
-
-#### S3 Upload (`s3.go`)
-
-Handles the multipart form construction for the S3 presigned upload. Separated from the main orchestration because the S3 request has different requirements (no cookies, no GitHub headers, just the presigned form fields and file data).
-
-### 7. CLI Entrypoint (`main.go`)
-
-`main()` is a one-line entrypoint that delegates to a testable
-`run(args []string, stdout, stderr io.Writer, deps) int`: it returns an exit code
-instead of calling `os.Exit`, writes to injected streams, and takes its I/O
-boundaries (repo resolution, cookie resolution, credential storage, upload, check-token)
-as a `deps` struct, so the full CLI spine is exercised in tests without network,
-subprocess, or process exit.
-
-Responsibilities:
-
-- **Manual arg parsing** so that flags can appear before or after positional args, with `--` as an explicit terminator for filenames starting with a dash.
-- **Subcommand dispatch** for `auth-store` and `check-token`, with validation that disallowed flag combinations are rejected before any work is done.
-- **Session resolution** via `resolveSessionCookie`, which applies the flag → env → dedicated credential precedence and wraps raw token values into a properly scoped `*http.Cookie`.
-- **Fail-closed evidence validation** before repository resolution or session-cookie access.
-- **Single upload**: batches are rejected; one validation or upload failure exits non-zero.
-
-## Data Flow
-
-```mermaid
-flowchart TD
-    Start(["<b>User:</b> gh image /evidence/screenshot.png --repo o/r"])
-    Validate["<b>Validate and snapshot</b><br/>absolute PNG under evidence root<br/><i>≤ 10,000,000 bytes</i>"]
-    Session["<b>Resolve Session</b><br/>flag → env → gh-image credential"]
-
-    Start --> Validate --> Session
-
-    subgraph PerImage ["For each file"]
-        direction TB
-        Token["<b>Fetch uploadToken</b><br/>GET /:owner/:repo"]
-        Policy["<b>Request Policy</b><br/>POST /upload/policies/assets"]
-        S3["<b>Upload to S3</b><br/>POST policy.upload_url<br/><i>(no GitHub auth)</i>"]
-        Finalize["<b>Finalize</b><br/>PUT {asset_upload_url}"]
-        Print["<b>Print markdown</b><br/>to stdout"]
-
-        Token -- "uploadToken" --> Policy
-        Policy -- "S3 presigned form +<br/>asset_upload_authenticity_token" --> S3
-        S3 -- "200 / 201 / 204" --> Finalize
-        Finalize -- "asset href URL" --> Print
-    end
-
-    Session -- "user_session" --> Token
-
-    classDef ghAuth fill:#e8f0ff,stroke:#4a6fa5,color:#000
-    classDef s3 fill:#fff4e0,stroke:#c08a2e,color:#000
-    classDef terminal fill:#e8f5e8,stroke:#5a8a5a,color:#000
-    class Session,Token,Policy,Finalize ghAuth
-    class S3 s3
-    class Start,Print terminal
-```
-
-## Authentication Model
-
-| Action | Auth Method | Source |
-|---|---|---|
-| Steps 0, 1, 3 (GitHub requests) | `user_session` + `__Host-user_session_same_site` cookies | `--token` flag, `GH_SESSION_TOKEN`, or dedicated OS credential |
-| Step 2 (S3 upload) | None | Presigned policy from step 1 |
-| Repo ID lookup | OAuth token | `gh` CLI (via `gh auth`) |
-| `check-token` validation | Same `user_session` pair | Same precedence as upload |
-
-The session-cookie path and the `gh` CLI auth path are independent. The cookie provides a browser-equivalent session for the undocumented upload API, while `gh` handles the standard REST API used only for looking up the numeric repository ID.
-
-## Distribution
-
-Built as a [`gh` CLI extension](https://cli.github.com/manual/gh_extension):
-
-- Repository is named `gh-image` so it installs as `gh image`
-- GoReleaser builds binaries for macOS (arm64, amd64), Linux (amd64, arm64), and Windows (amd64) on tagged releases
-- `gh extension install` auto-detects the user's platform and downloads the correct binary from the GitHub Release
-- Single static binary, no runtime dependencies (beyond the `gh` CLI and `git`)
-
-### Release Flow
-
-```
-git tag vX.Y.Z
-git push --tags
-→ GitHub Actions triggers
-  → GoReleaser cross-compiles
-  → Attaches binaries to GitHub Release
-→ Users: gh extension install tandemhealth/gh-image --pin vX.Y.Z-tandem.N
-```
-
-## Dependencies
-
-| Dependency | Purpose |
+| Field | Required value |
 |---|---|
-| [`zalando/go-keyring`](https://github.com/zalando/go-keyring) | Dedicated OS credential storage |
-| Go standard library `net/http` | HTTP client + cookie jar for the upload flow |
-| Go standard library `mime/multipart` | Multipart form construction |
-| Go standard library `encoding/json` | JSON parsing |
-| Go standard library `regexp` | uploadToken and `user-login` extraction |
+| Tag | `gh-image-evidence` |
+| Title | `Automated screenshot evidence` |
+| Draft | `false` |
+| Prerelease | `true` |
+| Latest release | `false` |
 
-## Platform Notes
+`gh image init` first checks repository push permission and reads the release by tag. If the release does not exist, it creates it from the default branch. A concurrent initializer can return HTTP 422; the client then reads and validates the release created by the other process.
 
-- **macOS:** The dedicated entry uses Login Keychain. The program never requests Chrome Safe Storage.
-- **Linux:** The dedicated entry uses Secret Service (for example GNOME Keyring).
-- **Windows:** The dedicated entry uses Windows Credential Manager. Binaries are built for Windows amd64.
-- **Android (Termux):** The OS credential backend is unavailable; use `GH_SESSION_TOKEN` from a dedicated account.
-- **CI / headless environments:** Use `GH_SESSION_TOKEN` from a dedicated bot account.
+`check-access` and normal upload require the exact existing metadata. They do not repair or create it.
 
-## Security Boundary
+## Evidence boundary
 
-The configured evidence root prevents accidental uploads outside the screenshot directory. It is not a security boundary against a process that can replace `GH_IMAGE_EVIDENCE_ROOT`, change command-line arguments, or create hard links. The immutable snapshot prevents later path replacement or same-inode writes from changing the bytes covered by GitHub's upload policy.
+`internal/upload.OpenEvidence` runs before repository resolution or GitHub access. It requires one absolute PNG below one absolute evidence root. It rejects symlinks in every path component, path escapes, non-regular files, malformed PNG chunks, unsafe dimensions, and files over 10,000,000 bytes. It decodes and re-encodes the image into an immutable in-memory snapshot.
 
-The dedicated credential prevents `gh-image` from requesting a browser-wide encryption key. It does not reduce the authority of `user_session`, and the operating system's credential service—not this program—decides which same-user processes may request the stored entry.
+The uploader hashes that snapshot with SHA-256. The release asset name is `<64-lowercase-hex>.png`, so the same bytes have the same URL.
+
+## Upload sequence
+
+1. Read repository metadata and require `permissions.push=true`.
+2. Read and validate the `gh-image-evidence` prerelease.
+3. List every release asset with `per_page=100`, `--paginate`, and `--slurp`.
+4. Reuse an asset only when its name, `uploaded` state, size, and exact browser URL match.
+5. If no match exists, send the PNG to GitHub's documented release-asset endpoint through `gh api --input -`.
+6. If another process wins the same upload and GitHub returns HTTP 422, reread the exhaustive asset list with bounded backoff until the exact asset reaches `uploaded` with the expected size.
+7. Print Markdown containing `https://github.com/<owner>/<repo>/releases/download/gh-image-evidence/<digest>.png`.
+
+The client has no delete, rename, clobber, or replace request. A matching name with a different size is an error.
+
+## GitHub hosts
+
+Metadata uses `api.github.com` through ordinary `gh api` endpoints. Asset bytes use the documented `uploads.github.com` URL. The returned link is accepted only when it exactly matches the named repository, managed tag, and digest filename on `github.com`.

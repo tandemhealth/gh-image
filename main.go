@@ -1,454 +1,241 @@
 package main
 
 import (
-	"errors"
+	"crypto/sha256"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"strings"
 
-	"github.com/tandemhealth/gh-image/internal/cookies"
-	"github.com/tandemhealth/gh-image/internal/credential"
+	"github.com/tandemhealth/gh-image/internal/release"
 	"github.com/tandemhealth/gh-image/internal/repo"
-	"github.com/tandemhealth/gh-image/internal/session"
 	"github.com/tandemhealth/gh-image/internal/upload"
-	"golang.org/x/term"
 )
 
 const usage = `Usage:
-  gh image [--repo owner/repo] [--token <value>] [--evidence-root <absolute-dir>] <absolute-png-path>
-  gh image auth-store
-  gh image check-token [--token <value>]
+  gh image [--repo owner/repo] [--evidence-root <absolute-dir>] <absolute-png-path>
+  gh image init [--repo owner/repo]
+  gh image check-access [--repo owner/repo]
   gh image --version`
 
-// version is set via -ldflags "-X main.version=..." at release build time.
 var version = "dev"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, productionDeps()))
 }
 
-type uploadInput struct {
-	path     string
-	evidence *upload.Evidence
-}
-
-// uploadFunc uploads one validated evidence snapshot and returns its markdown reference.
-type uploadFunc func(info *repo.Info, input uploadInput) (string, error)
-
-// deps are the I/O boundaries run() depends on; productionDeps wires the real ones,
-// tests inject stubs so the orchestration spine runs without network/subprocess/exit.
 type deps struct {
 	resolveRepo     func(owner, name string) (*repo.Info, error)
-	resolveCookie   func(tokenFlag string) (*http.Cookie, error)
 	evidenceRootEnv string
 	openEvidence    func(root, path string) (*upload.Evidence, error)
-	// newUploader builds an uploader from a session cookie. It is called once per
-	// run so the underlying HTTP client (and its cookie jar) is shared across all
-	// files, matching the single-client behavior of the original implementation.
-	newUploader func(cookie *http.Cookie) uploadFunc
-	readToken   func() (string, error)
-	storeToken  func(string) error
-	checkToken  func(tokenFlag string) (username, source string, err error)
+	initRelease     func(*repo.Info) (release.InitResult, error)
+	checkAccess     func(*repo.Info) (release.Release, error)
+	uploadEvidence  func(*repo.Info, *upload.Evidence) (string, error)
 }
 
 func productionDeps() deps {
+	client := release.NewClient(nil)
 	return deps{
-		resolveRepo: repo.Resolve,
-		resolveCookie: func(tokenFlag string) (*http.Cookie, error) {
-			cookie, _, err := resolveSessionCookie(tokenFlag)
-			return cookie, err
-		},
+		resolveRepo:     repo.Resolve,
 		evidenceRootEnv: os.Getenv("GH_IMAGE_EVIDENCE_ROOT"),
 		openEvidence:    upload.OpenEvidence,
-		newUploader: func(cookie *http.Cookie) uploadFunc {
-			client := upload.NewClient(cookie)
-			return func(info *repo.Info, input uploadInput) (string, error) {
-				res, err := client.Upload(info.Owner, info.Name, info.ID, input.evidence)
-				if err != nil {
-					return "", err
-				}
-				return res.Markdown, nil
+		initRelease: func(info *repo.Info) (release.InitResult, error) {
+			return client.Init(info.Owner, info.Name)
+		},
+		checkAccess: func(info *repo.Info) (release.Release, error) {
+			return client.CheckAccess(info.Owner, info.Name)
+		},
+		uploadEvidence: func(info *repo.Info, evidence *upload.Evidence) (string, error) {
+			hash := sha256.New()
+			if _, err := io.Copy(hash, evidence.Reader()); err != nil {
+				return "", fmt.Errorf("hashing validated PNG: %w", err)
 			}
-		},
-		readToken: func() (string, error) {
-			return readSessionToken(os.Stdin, os.Stderr)
-		},
-		storeToken: credential.Set,
-		checkToken: func(tokenFlag string) (string, string, error) {
-			return checkToken(tokenFlag, resolveSessionCookie, session.CheckValidity)
+			digest := fmt.Sprintf("%x", hash.Sum(nil))
+			result, err := client.Upload(info.Owner, info.Name, digest, evidence.Size(), evidence.Reader())
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("![%s](%s)", evidence.Name(), result.URL), nil
 		},
 	}
 }
 
-func run(args []string, stdout, stderr io.Writer, d deps) int {
-	var repoFlag string
-	var repoSet bool
-	var tokenFlag string
-	var tokenSet bool
-	var evidenceRootFlag string
-	var evidenceRootSet bool
-	var paths []string
-	var firstPosAfterDoubleDash bool
+type parsedArgs struct {
+	repoFlag        string
+	repoSet         bool
+	evidenceRoot    string
+	evidenceSet     bool
+	positionals     []string
+	afterDoubleDash bool
+}
 
-	// Manual arg parsing so flags can appear anywhere (before or after positional args).
+func parseArgs(args []string, stdout, stderr io.Writer) (parsedArgs, int, bool) {
+	var parsed parsedArgs
 	flagsDone := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-
-		// After "--", everything is a positional arg
 		if flagsDone {
-			if len(paths) == 0 {
-				firstPosAfterDoubleDash = true
-			}
-			paths = append(paths, arg)
+			parsed.positionals = append(parsed.positionals, arg)
 			continue
 		}
-
 		switch {
 		case arg == "--":
 			flagsDone = true
+			parsed.afterDoubleDash = len(parsed.positionals) == 0
 		case arg == "--repo":
-			if repoSet {
-				fmt.Fprintf(stderr, "Error: --repo specified more than once\n")
-				return 1
+			if parsed.repoSet {
+				fmt.Fprintln(stderr, "Error: --repo specified more than once")
+				return parsed, 1, false
 			}
 			if i+1 >= len(args) {
 				fmt.Fprintf(stderr, "Error: --repo requires a value (owner/repo)\n%s\n", usage)
-				return 1
+				return parsed, 1, false
 			}
 			i++
-			repoFlag = args[i]
-			repoSet = true
+			parsed.repoFlag, parsed.repoSet = strings.TrimSpace(args[i]), true
 		case strings.HasPrefix(arg, "--repo="):
-			if repoSet {
-				fmt.Fprintf(stderr, "Error: --repo specified more than once\n")
-				return 1
+			if parsed.repoSet {
+				fmt.Fprintln(stderr, "Error: --repo specified more than once")
+				return parsed, 1, false
 			}
-			repoFlag = strings.SplitN(arg, "=", 2)[1]
-			repoSet = true
-		case arg == "--token":
-			if tokenSet {
-				fmt.Fprintf(stderr, "Error: --token specified more than once\n")
-				return 1
-			}
-			if i+1 >= len(args) {
-				fmt.Fprintf(stderr, "Error: --token requires a value\n%s\n", usage)
-				return 1
-			}
-			i++
-			tokenFlag = strings.TrimSpace(args[i])
-			if tokenFlag == "" {
-				fmt.Fprintf(stderr, "Error: --token value cannot be empty\n%s\n", usage)
-				return 1
-			}
-			tokenSet = true
-		case strings.HasPrefix(arg, "--token="):
-			if tokenSet {
-				fmt.Fprintf(stderr, "Error: --token specified more than once\n")
-				return 1
-			}
-			tokenFlag = strings.TrimSpace(strings.SplitN(arg, "=", 2)[1])
-			if tokenFlag == "" {
-				fmt.Fprintf(stderr, "Error: --token value cannot be empty\n%s\n", usage)
-				return 1
-			}
-			tokenSet = true
+			parsed.repoFlag, parsed.repoSet = strings.TrimSpace(strings.SplitN(arg, "=", 2)[1]), true
 		case arg == "--evidence-root":
-			if evidenceRootSet {
-				fmt.Fprintf(stderr, "Error: --evidence-root specified more than once\n")
-				return 1
+			if parsed.evidenceSet {
+				fmt.Fprintln(stderr, "Error: --evidence-root specified more than once")
+				return parsed, 1, false
 			}
 			if i+1 >= len(args) {
 				fmt.Fprintf(stderr, "Error: --evidence-root requires an absolute directory\n%s\n", usage)
-				return 1
+				return parsed, 1, false
 			}
 			i++
-			evidenceRootFlag = strings.TrimSpace(args[i])
-			if evidenceRootFlag == "" {
-				fmt.Fprintf(stderr, "Error: --evidence-root value cannot be empty\n%s\n", usage)
-				return 1
-			}
-			evidenceRootSet = true
+			parsed.evidenceRoot, parsed.evidenceSet = strings.TrimSpace(args[i]), true
 		case strings.HasPrefix(arg, "--evidence-root="):
-			if evidenceRootSet {
-				fmt.Fprintf(stderr, "Error: --evidence-root specified more than once\n")
-				return 1
+			if parsed.evidenceSet {
+				fmt.Fprintln(stderr, "Error: --evidence-root specified more than once")
+				return parsed, 1, false
 			}
-			evidenceRootFlag = strings.TrimSpace(strings.SplitN(arg, "=", 2)[1])
-			if evidenceRootFlag == "" {
-				fmt.Fprintf(stderr, "Error: --evidence-root value cannot be empty\n%s\n", usage)
-				return 1
-			}
-			evidenceRootSet = true
+			parsed.evidenceRoot, parsed.evidenceSet = strings.TrimSpace(strings.SplitN(arg, "=", 2)[1]), true
 		case arg == "--version":
 			fmt.Fprintf(stdout, "gh-image %s\n", version)
-			return 0
+			return parsed, 0, false
 		case arg == "--help" || arg == "-h":
 			fmt.Fprintf(stdout, "%s\n\n", usage)
-			fmt.Fprintln(stdout, "Upload one validated PNG screenshot to GitHub and print its markdown reference.")
-			fmt.Fprintln(stdout)
-			fmt.Fprintln(stdout, "The --repo flag is optional. If omitted, the repository is")
-			fmt.Fprintln(stdout, "inferred from the git remote in the current directory.")
-			fmt.Fprintln(stdout)
-			fmt.Fprintln(stdout, "Flags:")
-			fmt.Fprintln(stdout, "  --repo owner/repo   GitHub repository (optional)")
-			fmt.Fprintln(stdout, "  --token <value>     GitHub session token (default: dedicated OS credential)")
-			fmt.Fprintln(stdout, "                      Can also be set via GH_SESSION_TOKEN environment variable")
-			fmt.Fprintln(stdout, "                      WARNING: --token values are visible in process listings.")
-			fmt.Fprintln(stdout, "                      Prefer GH_SESSION_TOKEN on shared machines.")
-			fmt.Fprintln(stdout, "  --evidence-root     Absolute directory that contains the screenshot")
-			fmt.Fprintln(stdout, "                      Defaults to GH_IMAGE_EVIDENCE_ROOT")
-			fmt.Fprintln(stdout, "  --version           Print version and exit")
-			fmt.Fprintln(stdout)
-			fmt.Fprintln(stdout, "Subcommands:")
-			fmt.Fprintln(stdout, "  auth-store          Prompt for and store gh-image's dedicated OS credential")
-			fmt.Fprintln(stdout, "  check-token         Verify a session token is valid and print username to stdout")
-			fmt.Fprintln(stdout)
-			fmt.Fprintln(stdout, "The PNG path and evidence root must both be absolute.")
-			return 0
+			fmt.Fprintln(stdout, "Upload one validated PNG to a repository's managed GitHub prerelease and print Markdown.")
+			fmt.Fprintln(stdout, "The extension uses the existing GitHub CLI login. It never asks for or stores a token.")
+			fmt.Fprintln(stdout, "Run init once per target repository. Normal uploads and check-access never create remote state.")
+			return parsed, 0, false
 		case strings.HasPrefix(arg, "-") && arg != "-":
 			fmt.Fprintf(stderr, "Error: unknown flag %s\n", arg)
-			if strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") {
+			if !strings.HasPrefix(arg, "--") {
 				fmt.Fprintf(stderr, "If this is a filename, use: gh image -- %s\n", arg)
 			}
-			fmt.Fprintf(stderr, "Run 'gh image --help' for usage.\n")
-			return 1
+			fmt.Fprintln(stderr, "Run 'gh image --help' for usage.")
+			return parsed, 1, false
 		default:
-			paths = append(paths, arg)
+			parsed.positionals = append(parsed.positionals, arg)
 		}
 	}
+	return parsed, 0, true
+}
 
-	// Dispatch subcommands before any other validation.
-	subcommand, dispatchErr := classifySubcommand(paths, firstPosAfterDoubleDash, tokenFlag, repoSet, evidenceRootSet)
-	if dispatchErr != nil {
-		fmt.Fprintf(stderr, "Error: %v\n", dispatchErr)
-		var ue *usageError
-		if errors.As(dispatchErr, &ue) {
-			fmt.Fprintf(stderr, "%s\nRun 'gh image --help' for usage.\n", usage)
+func resolveTarget(parsed parsedArgs, d deps) (*repo.Info, error) {
+	var owner, name string
+	if parsed.repoSet {
+		parts := strings.Split(parsed.repoFlag, "/")
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return nil, fmt.Errorf("--repo must be in owner/repo format, got: %s", parsed.repoFlag)
 		}
-		return 1
+		owner, name = parts[0], parts[1]
 	}
-	switch subcommand {
-	case "auth-store":
-		value, err := d.readToken()
-		if err != nil {
-			fmt.Fprintf(stderr, "Error: reading session token: %v\n", err)
-			return 1
-		}
-		if err := d.storeToken(value); err != nil {
-			fmt.Fprintf(stderr, "Error: %v\n", err)
-			return 1
-		}
-		fmt.Fprintln(stderr, "Stored GitHub session in the dedicated gh-image OS credential")
-		return 0
-	case "check-token":
-		username, source, err := d.checkToken(tokenFlag)
-		if err != nil {
-			fmt.Fprintf(stderr, "Error: %v\n", err)
-			return 1
-		}
-		fmt.Fprintf(stderr, "Token is valid (source: %s)\n", source)
-		if username != "" {
-			fmt.Fprintln(stdout, username)
-		}
-		return 0
-	}
+	return d.resolveRepo(owner, name)
+}
 
-	if len(paths) == 0 {
+func run(args []string, stdout, stderr io.Writer, d deps) int {
+	parsed, code, proceed := parseArgs(args, stdout, stderr)
+	if !proceed {
+		return code
+	}
+	if len(parsed.positionals) == 0 {
 		fmt.Fprintf(stderr, "%s\nRun 'gh image --help' for usage.\n", usage)
 		return 1
 	}
-	if len(paths) != 1 {
-		fmt.Fprintf(stderr, "Error: exactly one PNG path is required, got %d\n%s\n", len(paths), usage)
+
+	subcommand := ""
+	if !parsed.afterDoubleDash && (parsed.positionals[0] == "init" || parsed.positionals[0] == "check-access") {
+		subcommand = parsed.positionals[0]
+	}
+	if !parsed.afterDoubleDash && (parsed.positionals[0] == "auth-store" || parsed.positionals[0] == "check-token") {
+		fmt.Fprintf(stderr, "Error: %s was removed; gh-image uses the existing gh login and does not accept credentials\n", parsed.positionals[0])
 		return 1
 	}
-	if paths[0] == "" {
-		fmt.Fprintf(stderr, "Error: empty PNG path\n")
-		return 1
+	if subcommand != "" {
+		if len(parsed.positionals) != 1 {
+			fmt.Fprintf(stderr, "Error: %s does not take positional arguments\n", subcommand)
+			return 1
+		}
+		if parsed.evidenceSet {
+			fmt.Fprintf(stderr, "Error: --evidence-root cannot be combined with %s\n", subcommand)
+			return 1
+		}
+		info, err := resolveTarget(parsed, d)
+		if err != nil {
+			fmt.Fprintf(stderr, "Error resolving repository: %v\n", err)
+			return 1
+		}
+		if subcommand == "init" {
+			result, err := d.initRelease(info)
+			if err != nil {
+				fmt.Fprintf(stderr, "Error initializing image evidence: %v\n", err)
+				return 1
+			}
+			verb := "Ready"
+			if result.Created {
+				verb = "Created"
+			}
+			fmt.Fprintf(stdout, "%s %s/%s evidence release: %s\n", verb, info.Owner, info.Name, result.Release.HTMLURL)
+			return 0
+		}
+		if _, err := d.checkAccess(info); err != nil {
+			fmt.Fprintf(stderr, "Error checking image evidence access: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "GitHub image evidence access ready for %s/%s\n", info.Owner, info.Name)
+		return 0
 	}
 
-	evidenceRoot := evidenceRootFlag
-	if !evidenceRootSet {
-		evidenceRoot = strings.TrimSpace(d.evidenceRootEnv)
+	if len(parsed.positionals) != 1 {
+		fmt.Fprintf(stderr, "Error: exactly one PNG path is required, got %d\n%s\n", len(parsed.positionals), usage)
+		return 1
 	}
-	if evidenceRoot == "" {
+	path := parsed.positionals[0]
+	if path == "" {
+		fmt.Fprintln(stderr, "Error: empty PNG path")
+		return 1
+	}
+	root := parsed.evidenceRoot
+	if !parsed.evidenceSet {
+		root = strings.TrimSpace(d.evidenceRootEnv)
+	}
+	if root == "" {
 		fmt.Fprintln(stderr, "Error: evidence root is required; set --evidence-root or GH_IMAGE_EVIDENCE_ROOT")
 		return 1
 	}
-	if d.openEvidence == nil {
-		fmt.Fprintln(stderr, "Error: evidence validator is unavailable")
-		return 1
-	}
-	evidence, err := d.openEvidence(evidenceRoot, paths[0])
+	evidence, err := d.openEvidence(root, path)
 	if err != nil {
 		fmt.Fprintf(stderr, "Error validating screenshot: %v\n", err)
 		return 1
 	}
-
-	// Resolve repository
-	var owner, name string
-	if repoSet {
-		if repoFlag == "" {
-			fmt.Fprintf(stderr, "Error: --repo value cannot be empty\n")
-			return 1
-		}
-		parts := strings.SplitN(repoFlag, "/", 2)
-		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-			fmt.Fprintf(stderr, "Error: --repo must be in owner/repo format, got: %s\n", repoFlag)
-			return 1
-		}
-		owner, name = parts[0], parts[1]
-	}
-
-	repoInfo, err := d.resolveRepo(owner, name)
+	info, err := resolveTarget(parsed, d)
 	if err != nil {
 		fmt.Fprintf(stderr, "Error resolving repository: %v\n", err)
 		return 1
 	}
-
-	// Get session cookie (flag > env var > dedicated OS credential)
-	cookie, err := d.resolveCookie(tokenFlag)
+	markdown, err := d.uploadEvidence(info, evidence)
 	if err != nil {
-		fmt.Fprintf(stderr, "Error: %v\n", err)
-		return 1
-	}
-
-	// Build the uploader after evidence validation and session resolution.
-	uploadFile := d.newUploader(cookie)
-
-	input := uploadInput{path: paths[0], evidence: evidence}
-	markdown, err := uploadFile(repoInfo, input)
-	if err != nil {
-		fmt.Fprintf(stderr, "Error uploading %s: %v\n", paths[0], err)
+		fmt.Fprintf(stderr, "Error uploading %s: %v\n", path, err)
 		return 1
 	}
 	fmt.Fprintln(stdout, markdown)
 	return 0
-}
-
-// usageError wraps an error to signal that usage text should be shown alongside the message.
-type usageError struct{ err error }
-
-func (e *usageError) Error() string { return e.err.Error() }
-
-// classifySubcommand identifies whether the parsed positional args represent a
-// supported subcommand invocation and validates subcommand-specific constraints.
-func classifySubcommand(paths []string, firstPosAfterDoubleDash bool, tokenFlag string, repoSet, evidenceRootSet bool) (string, error) {
-	if len(paths) == 0 || firstPosAfterDoubleDash {
-		return "", nil
-	}
-	switch paths[0] {
-	case "auth-store":
-		if len(paths) > 1 {
-			return "", &usageError{fmt.Errorf("auth-store does not take positional arguments")}
-		}
-		if tokenFlag != "" {
-			return "", fmt.Errorf("--token cannot be combined with auth-store (auth-store reads from the terminal without echo)")
-		}
-		if repoSet {
-			return "", fmt.Errorf("--repo cannot be combined with auth-store")
-		}
-		if evidenceRootSet {
-			return "", fmt.Errorf("--evidence-root cannot be combined with auth-store")
-		}
-		return "auth-store", nil
-	case "check-token":
-		if len(paths) > 1 {
-			return "", &usageError{fmt.Errorf("check-token does not take positional arguments")}
-		}
-		if repoSet {
-			return "", fmt.Errorf("--repo cannot be combined with check-token")
-		}
-		if evidenceRootSet {
-			return "", fmt.Errorf("--evidence-root cannot be combined with check-token")
-		}
-		return "check-token", nil
-	default:
-		return "", nil
-	}
-}
-
-// resolveSessionCookie returns a GitHub session cookie using the first available
-// source: --token flag, GH_SESSION_TOKEN environment variable, or the dedicated
-// gh-image OS credential. It never reads a browser cookie database or browser
-// encryption key.
-func resolveSessionCookie(tokenFlag string) (*http.Cookie, string, error) {
-	return resolveSessionCookieWithGetter(tokenFlag, os.Getenv("GH_SESSION_TOKEN"), credential.Get)
-}
-
-// resolveSessionCookieWithGetter is a testable variant of resolveSessionCookie
-// that accepts explicit env value and dedicated credential getter dependencies.
-// Returns the cookie, a human-readable source label, and any error.
-func resolveSessionCookieWithGetter(tokenFlag, envToken string, getCredential func() (string, error)) (*http.Cookie, string, error) {
-	if tokenFlag != "" {
-		cookie, err := cookieFromValue(tokenFlag)
-		if err != nil {
-			return nil, "", fmt.Errorf("--token flag: %w", err)
-		}
-		return cookie, "--token flag", nil
-	}
-	if envToken != "" {
-		cookie, err := cookieFromValue(envToken)
-		if err != nil {
-			return nil, "", fmt.Errorf("GH_SESSION_TOKEN: %w", err)
-		}
-		return cookie, "GH_SESSION_TOKEN", nil
-	}
-	if getCredential == nil {
-		return nil, "", fmt.Errorf("no session token found: gh-image credential getter is unavailable")
-	}
-	value, err := getCredential()
-	if err != nil {
-		return nil, "", fmt.Errorf("resolving session cookie: %w", err)
-	}
-	cookie, err := cookieFromValue(value)
-	if err != nil {
-		return nil, "", fmt.Errorf("gh-image OS credential: %w", err)
-	}
-	return cookie, "gh-image OS credential", nil
-}
-
-// readSessionToken reads a secret only from an interactive terminal and disables
-// echo while the user types it. This keeps the value out of shell history,
-// process listings, stdout, and agent command output.
-func readSessionToken(in *os.File, prompt io.Writer) (string, error) {
-	fd := int(in.Fd())
-	if !term.IsTerminal(fd) {
-		return "", fmt.Errorf("auth-store requires an interactive terminal")
-	}
-	fmt.Fprint(prompt, "GitHub user_session: ")
-	value, err := term.ReadPassword(fd)
-	fmt.Fprintln(prompt)
-	if err != nil {
-		return "", err
-	}
-	valueString := strings.TrimSpace(string(value))
-	if _, err := cookieFromValue(valueString); err != nil {
-		return "", err
-	}
-	return valueString, nil
-}
-
-// cookieFromValue constructs a GitHub user_session cookie from a raw token value.
-func cookieFromValue(value string) (*http.Cookie, error) {
-	value = strings.TrimSpace(value) // defensive: env vars arrive untrimmed; flag path trims earlier
-	if value == "" {
-		return nil, fmt.Errorf("session token is empty")
-	}
-	return cookies.NewSessionCookie(value), nil
-}
-
-// checkToken resolves and validates a session token, returning the authenticated username and source.
-func checkToken(tokenFlag string, resolver func(string) (*http.Cookie, string, error), validator func(*http.Cookie) (string, error)) (string, string, error) {
-	cookie, source, err := resolver(tokenFlag)
-	if err != nil {
-		return "", "", err
-	}
-	username, err := validator(cookie)
-	if err != nil {
-		return "", "", err
-	}
-	return username, source, nil
 }
